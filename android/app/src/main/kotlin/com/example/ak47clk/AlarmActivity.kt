@@ -80,13 +80,6 @@ class AlarmActivity : AppCompatActivity() {
             finish()
         }
         
-        // Set up snooze button
-        val snoozeButton = findViewById<Button>(R.id.snoozeButton)
-        snoozeButton.setOnClickListener {
-            snoozeAlarm()
-            finish()
-        }
-        
         // Start alarm sound and vibration
         startAlarmSound()
         startVibration()
@@ -138,45 +131,6 @@ class AlarmActivity : AppCompatActivity() {
         mediaPlayer = null
         
         vibrator?.cancel()
-    }
-    
-    private fun snoozeAlarm() {
-        stopAlarm()
-        
-        // Set a new alarm for 5 minutes later
-        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val calendar = Calendar.getInstance()
-        calendar.add(Calendar.MINUTE, 5)
-        
-        val hour = calendar.get(Calendar.HOUR_OF_DAY)
-        val minute = calendar.get(Calendar.MINUTE)
-        
-        val intent = Intent(this, AlarmActivity::class.java).apply {
-            putExtra("HOUR", hour)
-            putExtra("MINUTE", minute)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        
-        val requestCode = (hour * 100) + minute
-        val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.getActivity(this, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        } else {
-            PendingIntent.getActivity(this, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT)
-        }
-        
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            alarmManager.setExactAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP,
-                calendar.timeInMillis,
-                pendingIntent
-            )
-        } else {
-            alarmManager.setExact(
-                AlarmManager.RTC_WAKEUP,
-                calendar.timeInMillis,
-                pendingIntent
-            )
-        }
     }
     
     override fun onDestroy() {

@@ -42,24 +42,10 @@
         android:layout_marginBottom="64dp"
         android:backgroundTint="#FF5252"
         android:padding="16dp"
-        android:text="DISMISS"
+        android:text="Off"
         android:textSize="16sp"
         app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintEnd_toStartOf="@+id/snoozeButton"
-        app:layout_constraintStart_toStartOf="parent" />
-
-    <Button
-        android:id="@+id/snoozeButton"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="16dp"
-        android:layout_marginEnd="32dp"
-        android:backgroundTint="#2196F3"
-        android:padding="16dp"
-        android:text="SNOOZE (5 MIN)"
-        android:textSize="16sp"
-        app:layout_constraintBaseline_toBaselineOf="@+id/dismissButton"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toEndOf="@+id/dismissButton" />
+        app:layout_constraintStart_toStartOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

@@ -45,6 +45,23 @@ class MainActivity: FlutterActivity() {
                         result.error("ALARM_ERROR", "Failed to set alarm", e.message)
                     }
                 }
+                "setIntervalAlarms" -> {
+                    val fromHour = call.argument<Int>("fromHour") ?: 0
+                    val fromMinute = call.argument<Int>("fromMinute") ?: 0
+                    val toHour = call.argument<Int>("toHour") ?: 0
+                    val toMinute = call.argument<Int>("toMinute") ?: 0
+                    val intervalMinutes = call.argument<Int>("intervalMinutes") ?: 10
+                    
+                    try {
+                        Log.d(TAG, "Setting interval alarms from $fromHour:$fromMinute to $toHour:$toMinute with interval $intervalMinutes minutes")
+                        val alarmTimes = setIntervalAlarms(fromHour, fromMinute, toHour, toMinute, intervalMinutes)
+                        alarms.addAll(alarmTimes)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error setting interval alarms", e)
+                        result.error("ALARM_ERROR", "Failed to set interval alarms", e.message)
+                    }
+                }
                 "getAlarms" -> {
                     Log.d(TAG, "Getting alarms: ${alarms.toList()}")
                     result.success(alarms.toList())
@@ -63,6 +80,25 @@ class MainActivity: FlutterActivity() {
                         result.error("ALARM_ERROR", "Failed to delete alarm", e.message)
                     }
                 }
+                "deleteAllAlarms" -> {
+                    try {
+                        Log.d(TAG, "Deleting all alarms")
+                        val alarmsToDelete = alarms.toList()
+                        for (alarm in alarmsToDelete) {
+                            val parts = alarm.split(":")
+                            if (parts.size == 2) {
+                                val hour = parts[0].toInt()
+                                val minute = parts[1].toInt()
+                                deleteAlarm(hour, minute)
+                            }
+                        }
+                        alarms.clear()
+                        result.success(true)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error deleting all alarms", e)
+                        result.error("ALARM_ERROR", "Failed to delete all alarms", e.message)
+                    }
+                }
                 else -> {
                     result.notImplemented()
                 }
@@ -72,19 +108,21 @@ class MainActivity: FlutterActivity() {
 
     private fun setAlarm(hour: Int, minute: Int) {
         val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val intent = Intent(this, AlarmActivity::class.java).apply {
+        
+        // Create intent for AlarmReceiver (not directly for AlarmActivity)
+        val intent = Intent(this, AlarmReceiver::class.java).apply {
+            action = ALARM_ACTION
             putExtra("HOUR", hour)
             putExtra("MINUTE", minute)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         
         // Create a unique request code for this alarm
         val requestCode = (hour * 100) + minute
         
         val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.getActivity(this, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            PendingIntent.getBroadcast(this, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         } else {
-            PendingIntent.getActivity(this, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT)
+            PendingIntent.getBroadcast(this, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT)
         }
         
         // Set the alarm time
@@ -119,19 +157,52 @@ class MainActivity: FlutterActivity() {
     
     private fun deleteAlarm(hour: Int, minute: Int) {
         val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val intent = Intent(this, AlarmActivity::class.java)
+        
+        // Create the same intent used to set the alarm
+        val intent = Intent(this, AlarmReceiver::class.java).apply {
+            action = ALARM_ACTION
+            putExtra("HOUR", hour)
+            putExtra("MINUTE", minute)
+        }
         val requestCode = (hour * 100) + minute
         
         val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.getActivity(this, requestCode, intent, PendingIntent.FLAG_IMMUTABLE)
+            PendingIntent.getBroadcast(this, requestCode, intent, PendingIntent.FLAG_IMMUTABLE)
         } else {
-            PendingIntent.getActivity(this, requestCode, intent, 0)
+            PendingIntent.getBroadcast(this, requestCode, intent, 0)
         }
         
         alarmManager.cancel(pendingIntent)
         Log.d(TAG, "Alarm cancelled for $hour:$minute")
     }
     
+    private fun setIntervalAlarms(fromHour: Int, fromMinute: Int, toHour: Int, toMinute: Int, intervalMinutes: Int): List<String> {
+        val alarmTimes = mutableListOf<String>()
+        
+        // Calculate start and end times in minutes from midnight
+        val startMinutes = (fromHour * 60) + fromMinute
+        val endMinutes = (toHour * 60) + toMinute
+        
+        if (startMinutes > endMinutes) {
+            throw IllegalArgumentException("Start time must be before end time")
+        }
+        
+        // Set alarms at intervals
+        var currentMinutes = startMinutes
+        while (currentMinutes <= endMinutes) {
+            val hour = currentMinutes / 60
+            val minute = currentMinutes % 60
+            
+            setAlarm(hour, minute)
+            alarmTimes.add("$hour:$minute")
+            
+            Log.d(TAG, "Added interval alarm at $hour:$minute")
+            currentMinutes += intervalMinutes
+        }
+        
+        return alarmTimes
+    }
+
     private val alarmReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == ALARM_ACTION) {
