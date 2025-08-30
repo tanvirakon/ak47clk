@@ -9,11 +9,15 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     
     <application
-        android:label="AK47 Alarm Clock"
+        android:label="ak47clk"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/launcher_icon">
         
         <activity
             android:name=".MainActivity"
@@ -40,7 +44,8 @@
         <!-- Our custom alarm activity -->
         <activity
             android:name=".AlarmActivity"
-            android:exported="false"
+            android:exported="true"
+            android:launchMode="singleTop"
             android:theme="@style/Theme.AppCompat.NoActionBar"
             android:showOnLockScreen="true"
             android:showWhenLocked="true"
@@ -54,6 +59,18 @@
             <intent-filter>
                 <action android:name="com.example.ak47clk.ALARM" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+        
+        <!-- Receiver to restore alarms on device restart -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </receiver>
         

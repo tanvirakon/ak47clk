@@ -7,8 +7,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import androidx.annotation.NonNull
+import androidx.annotation.RequiresApi
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -22,6 +25,14 @@ class MainActivity: FlutterActivity() {
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        
+        // Request to be exempt from battery optimization
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            requestBatteryOptimizationExemption()
+        }
+        
+        // Load saved alarms from SharedPreferences
+        loadSavedAlarms()
         
         // Register broadcast receiver for alarms
         val filter = IntentFilter(ALARM_ACTION)
@@ -93,6 +104,14 @@ class MainActivity: FlutterActivity() {
                             }
                         }
                         alarms.clear()
+                        
+                        // Clear all alarm preferences
+                        val sharedPrefs = getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
+                        sharedPrefs.edit().clear().apply()
+                        
+                        // Save empty alarm list
+                        saveAlarmList()
+                        
                         result.success(true)
                     } catch (e: Exception) {
                         Log.e(TAG, "Error deleting all alarms", e)
@@ -109,7 +128,7 @@ class MainActivity: FlutterActivity() {
     private fun setAlarm(hour: Int, minute: Int) {
         val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
         
-        // Create intent for AlarmReceiver (not directly for AlarmActivity)
+        // Create intent for AlarmReceiver
         val intent = Intent(this, AlarmReceiver::class.java).apply {
             action = ALARM_ACTION
             putExtra("HOUR", hour)
@@ -137,18 +156,94 @@ class MainActivity: FlutterActivity() {
             }
         }
         
-        // Set the alarm
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        // Store alarm time in SharedPreferences for restoration after reboot and app restart
+        val sharedPrefs = getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
+        sharedPrefs.edit().putString("alarm_${hour}_${minute}", "$hour:$minute").apply()
+        
+        // Save the current list of alarms
+        saveAlarmList()
+        
+        // Set the alarm with multiple approaches for reliability
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // For Android 12+, need to check if permission is granted
+            if (alarmManager.canScheduleExactAlarms()) {
+                // Primary method: Exact and allow while idle
+                alarmManager.setExactAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    calendar.timeInMillis,
+                    pendingIntent
+                )
+                
+                // Secondary backup method: Set an inexact repeating alarm as well (daily)
+                val backupIntent = PendingIntent.getBroadcast(
+                    this,
+                    (hour * 100) + minute + 10000, // Different request code
+                    intent,
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) 
+                        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                    else 
+                        PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                alarmManager.setRepeating(
+                    AlarmManager.RTC_WAKEUP,
+                    calendar.timeInMillis,
+                    AlarmManager.INTERVAL_DAY,
+                    backupIntent
+                )
+            } else {
+                // Request permission if not granted
+                requestScheduleExactAlarmPermission()
+                
+                // Use less precise method as fallback
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    calendar.timeInMillis,
+                    pendingIntent
+                )
+            }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            // Primary method for Android 6.0+
             alarmManager.setExactAndAllowWhileIdle(
                 AlarmManager.RTC_WAKEUP,
                 calendar.timeInMillis,
                 pendingIntent
             )
+            
+            // Secondary backup method: Set an inexact repeating alarm as well (daily)
+            val backupIntent = PendingIntent.getBroadcast(
+                this,
+                (hour * 100) + minute + 10000, // Different request code
+                intent,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) 
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                else 
+                    PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            alarmManager.setRepeating(
+                AlarmManager.RTC_WAKEUP,
+                calendar.timeInMillis,
+                AlarmManager.INTERVAL_DAY,
+                backupIntent
+            )
         } else {
+            // For older Android versions
             alarmManager.setExact(
                 AlarmManager.RTC_WAKEUP,
                 calendar.timeInMillis,
                 pendingIntent
+            )
+            
+            // Also set repeating alarm for added reliability
+            alarmManager.setRepeating(
+                AlarmManager.RTC_WAKEUP,
+                calendar.timeInMillis,
+                AlarmManager.INTERVAL_DAY,
+                PendingIntent.getBroadcast(
+                    this,
+                    (hour * 100) + minute + 10000,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT
+                )
             )
         }
         
@@ -173,6 +268,14 @@ class MainActivity: FlutterActivity() {
         }
         
         alarmManager.cancel(pendingIntent)
+        
+        // Remove from SharedPreferences
+        val sharedPrefs = getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
+        sharedPrefs.edit().remove("alarm_${hour}_${minute}").apply()
+        
+        // Save the current list of alarms
+        saveAlarmList()
+        
         Log.d(TAG, "Alarm cancelled for $hour:$minute")
     }
     
@@ -221,8 +324,144 @@ class MainActivity: FlutterActivity() {
         }
     }
     
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun checkAlarmPermission() {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        if (!alarmManager.canScheduleExactAlarms()) {
+            // For Android 12+, need to request permission
+            val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+            startActivity(intent)
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.M)
+    private fun requestBatteryOptimizationExemption() {
+        val packageName = packageName
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        
+        if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+            try {
+                // Request to be exempted from battery optimization
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = android.net.Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to request battery optimization exemption", e)
+            }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun requestScheduleExactAlarmPermission() {
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+            intent.putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to request SCHEDULE_EXACT_ALARM permission", e)
+        }
+    }
+    
+    override fun onResume() {
+        super.onResume()
+        
+        // Check if we need to restore alarms (e.g., after reboot)
+        if (intent?.getBooleanExtra("RESTORE_ALARMS", false) == true) {
+            restoreAlarms()
+        }
+    }
+    
+    override fun onPause() {
+        super.onPause()
+        
+        // Save alarm list when app goes to background
+        saveAlarmList()
+    }
+    
+    /**
+     * Restore alarms from SharedPreferences after device reboot
+     */
+    private fun restoreAlarms() {
+        Log.d(TAG, "Restoring alarms from preferences")
+        val sharedPrefs = getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
+        val allPrefs = sharedPrefs.all
+        
+        for ((key, value) in allPrefs) {
+            if (key.startsWith("alarm_") && value is String) {
+                try {
+                    val parts = value.split(":")
+                    if (parts.size == 2) {
+                        val hour = parts[0].toInt()
+                        val minute = parts[1].toInt()
+                        Log.d(TAG, "Restoring alarm for $hour:$minute")
+                        setAlarm(hour, minute)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error restoring alarm: $value", e)
+                }
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            checkAlarmPermission()
+        }
+    }
+    
+    /**
+     * Save the current list of alarms to SharedPreferences
+     */
+    private fun saveAlarmList() {
+        val sharedPrefs = getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
+        val editor = sharedPrefs.edit()
+        
+        // Save the entire alarm list as a comma-separated string
+        val alarmListString = alarms.joinToString(",")
+        editor.putString("alarm_list", alarmListString)
+        
+        // Apply changes
+        editor.apply()
+        
+        Log.d(TAG, "Saved alarm list: $alarmListString")
+    }
+    
+    /**
+     * Load saved alarms from SharedPreferences
+     */
+    private fun loadSavedAlarms() {
+        val sharedPrefs = getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
+        
+        // Get the alarm list string
+        val alarmListString = sharedPrefs.getString("alarm_list", "")
+        
+        // Clear current alarm list
+        alarms.clear()
+        
+        // Parse and add each alarm
+        if (!alarmListString.isNullOrEmpty()) {
+            val alarmArray = alarmListString.split(",")
+            
+            for (alarm in alarmArray) {
+                if (alarm.trim().isNotEmpty()) {
+                    alarms.add(alarm.trim())
+                    Log.d(TAG, "Loaded alarm: $alarm")
+                }
+            }
+        }
+        
+        Log.d(TAG, "Loaded ${alarms.size} alarms from preferences")
+    }
+    
     override fun onDestroy() {
         super.onDestroy()
-        unregisterReceiver(alarmReceiver)
+        
+        // Save the alarm list before destroying
+        saveAlarmList()
+        
+        try {
+            unregisterReceiver(alarmReceiver)
+        } catch (e: Exception) {
+            // Ignore if receiver wasn't registered
+        }
     }
 }

@@ -11,6 +11,7 @@ import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
+import android.util.Log
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -32,25 +33,34 @@ class AlarmActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         
         // Set up the window to appear over the lock screen
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+            WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+        )
+        
+        // Modern API for appearing over lock screen
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
             
+            // Force unlock the keyguard
             val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
-            keyguardManager.requestDismissKeyguard(this, null)
-        } else {
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
-                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-            )
+            if (keyguardManager.isKeyguardLocked) {
+                keyguardManager.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
+                    override fun onDismissError() {
+                        // If dismissal fails, use older method as fallback
+                        window.addFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD)
+                    }
+                })
+            }
         }
         
         // Use a wake lock to keep the CPU running
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
+            PowerManager.FULL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.ON_AFTER_RELEASE,
             "AK47Clock:AlarmWakeLock"
         )
         wakeLock?.acquire(10*60*1000L) // 10 minutes
@@ -92,8 +102,8 @@ class AlarmActivity : AppCompatActivity() {
         mediaPlayer = MediaPlayer().apply {
             setAudioAttributes(
                 AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)  // Changed from USAGE_ALARM to USAGE_MEDIA
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)  // Changed from SONIFICATION to MUSIC
                     .build()
             )
             setDataSource(applicationContext, alarmSound)

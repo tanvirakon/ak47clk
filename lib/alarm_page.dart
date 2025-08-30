@@ -329,7 +329,7 @@ class _AlarmPageState extends State<AlarmPage> {
     final formattedToTime = _formatTime(_toTime.hour, _toTime.minute);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('AK47')),
+      appBar: AppBar(title: const Text('ak47clk')),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(

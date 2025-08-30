@@ -1,0 +1,24 @@
+    /**
+     * Restore alarms from SharedPreferences after device reboot
+     */
+    private fun restoreAlarms() {
+        Log.d(TAG, "Restoring alarms from preferences")
+        val sharedPrefs = getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
+        val allPrefs = sharedPrefs.all
+        
+        for ((key, value) in allPrefs) {
+            if (key.startsWith("alarm_") && value is String) {
+                try {
+                    val parts = value.split(":")
+                    if (parts.size == 2) {
+                        val hour = parts[0].toInt()
+                        val minute = parts[1].toInt()
+                        Log.d(TAG, "Restoring alarm for $hour:$minute")
+                        setAlarm(hour, minute)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error restoring alarm: $value", e)
+                }
+            }
+        }
+    }
