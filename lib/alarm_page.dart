@@ -2,7 +2,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
-import 'package:intl/intl.dart'; // Add this import for time formatting
+import 'package:intl/intl.dart';
+import 'theme_provider.dart';
+import 'package:provider/provider.dart';
 
 class AlarmPage extends StatefulWidget {
   const AlarmPage({Key? key}) : super(key: key);
@@ -327,9 +329,23 @@ class _AlarmPageState extends State<AlarmPage> {
     // Format times for display
     final formattedFromTime = _formatTime(_fromTime.hour, _fromTime.minute);
     final formattedToTime = _formatTime(_toTime.hour, _toTime.minute);
+    final themeProvider = Provider.of<ThemeProvider>(context);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('ak47clk')),
+      appBar: AppBar(
+        title: const Text('ak47clk'),
+        actions: [
+          IconButton(
+            icon: Icon(
+              themeProvider.isDarkMode ? Icons.light_mode : Icons.dark_mode,
+            ),
+            onPressed: () {
+              themeProvider.toggleTheme(!themeProvider.isDarkMode);
+            },
+            tooltip: themeProvider.isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode',
+          ),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
