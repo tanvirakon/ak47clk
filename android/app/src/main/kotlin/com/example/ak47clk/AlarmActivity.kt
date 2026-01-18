@@ -32,15 +32,17 @@ class AlarmActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // Set up the window to appear over the lock screen
+        // Set up the window to appear over EVERYTHING including lock screen and other apps
         window.addFlags(
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
             WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
             WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+            WindowManager.LayoutParams.FLAG_FULLSCREEN or
+            WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
         )
         
-        // Modern API for appearing over lock screen
+        // Modern API for appearing over lock screen and other apps
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -86,8 +88,7 @@ class AlarmActivity : AppCompatActivity() {
         // Set up dismiss button
         val dismissButton = findViewById<Button>(R.id.dismissButton)
         dismissButton.setOnClickListener {
-            stopAlarm()
-            finish()
+            dismissAlarm(hour, minute)
         }
         
         // Start alarm sound and vibration
@@ -102,12 +103,14 @@ class AlarmActivity : AppCompatActivity() {
         mediaPlayer = MediaPlayer().apply {
             setAudioAttributes(
                 AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)  // Changed from USAGE_ALARM to USAGE_MEDIA
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)  // Changed from SONIFICATION to MUSIC
+                    .setUsage(AudioAttributes.USAGE_ALARM)  // Use USAGE_ALARM for proper audio focus
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .setFlags(AudioAttributes.FLAG_AUDIBILITY_ENFORCED)
                     .build()
             )
             setDataSource(applicationContext, alarmSound)
             isLooping = true
+            setVolume(1.0f, 1.0f)
             prepare()
             start()
         }
@@ -135,6 +138,90 @@ class AlarmActivity : AppCompatActivity() {
         }
     }
     
+    private fun dismissAlarm(hour: Int, minute: Int) {
+        Log.d("AlarmActivity", "Dismissing alarm for $hour:$minute - FORCE STOP")
+        
+        // FIRST: Stop the service immediately using static method
+        AlarmService.requestStop()
+        
+        // Stop local alarm sound and vibration
+        stopAlarm()
+        
+        // Cancel the alarm in AlarmManager so it doesn't fire again
+        cancelAlarmInManager(hour, minute)
+        
+        // Stop the service using multiple methods to ensure it stops
+        val serviceIntent = Intent(this, AlarmService::class.java).apply {
+            putExtra("STOP_ALARM", true)
+        }
+        
+        // Method 1: Start service with stop command
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+            Log.d("AlarmActivity", "Sent stop command via startService")
+        } catch (e: Exception) {
+            Log.e("AlarmActivity", "Error starting service with stop command: ${e.message}", e)
+        }
+        
+        // Method 2: Stop service directly
+        try {
+            stopService(serviceIntent)
+            Log.d("AlarmActivity", "Called stopService")
+        } catch (e: Exception) {
+            Log.e("AlarmActivity", "Error calling stopService: ${e.message}", e)
+        }
+        
+        // Method 3: Try again after a short delay to ensure it stops
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            try {
+                AlarmService.requestStop()
+                stopService(serviceIntent)
+                Log.d("AlarmActivity", "Retry stop after delay")
+            } catch (e: Exception) {
+                Log.e("AlarmActivity", "Error in delayed stop: ${e.message}", e)
+            }
+        }, 100)
+        
+        finish()
+    }
+    
+    private fun cancelAlarmInManager(hour: Int, minute: Int) {
+        try {
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val intent = Intent(this, AlarmReceiver::class.java).apply {
+                action = "com.example.ak47clk.ALARM"
+                putExtra("HOUR", hour)
+                putExtra("MINUTE", minute)
+            }
+            val requestCode = (hour * 100) + minute
+            
+            val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.getBroadcast(
+                    this,
+                    requestCode,
+                    intent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+            } else {
+                PendingIntent.getBroadcast(
+                    this,
+                    requestCode,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT
+                )
+            }
+            
+            alarmManager.cancel(pendingIntent)
+            Log.d("AlarmActivity", "Cancelled alarm in AlarmManager for $hour:$minute")
+        } catch (e: Exception) {
+            Log.e("AlarmActivity", "Failed to cancel alarm in AlarmManager: ${e.message}", e)
+        }
+    }
+    
     private fun stopAlarm() {
         mediaPlayer?.stop()
         mediaPlayer?.release()
@@ -146,6 +233,8 @@ class AlarmActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         stopAlarm()
-        wakeLock?.release()
+        if (wakeLock?.isHeld == true) {
+            wakeLock?.release()
+        }
     }
 }

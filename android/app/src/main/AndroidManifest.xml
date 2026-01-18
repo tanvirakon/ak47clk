@@ -51,6 +51,12 @@
             android:showWhenLocked="true"
             android:turnScreenOn="true" />
         
+        <!-- Alarm service -->
+        <service
+            android:name=".AlarmService"
+            android:exported="false"
+            android:foregroundServiceType="systemExempted" />
+        
         <!-- Register the AlarmReceiver -->
         <receiver
             android:name=".AlarmReceiver"

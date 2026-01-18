@@ -31,6 +31,20 @@ class MainActivity: FlutterActivity() {
             requestBatteryOptimizationExemption()
         }
         
+        // Request SYSTEM_ALERT_WINDOW permission for full-screen intents
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val settings = android.provider.Settings.canDrawOverlays(this)
+            if (!settings) {
+                Log.d(TAG, "Requesting SYSTEM_ALERT_WINDOW permission")
+                val intent = Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION, android.net.Uri.parse("package:$packageName"))
+                try {
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to request overlay permission", e)
+                }
+            }
+        }
+        
         // Load saved alarms from SharedPreferences
         loadSavedAlarms()
         
@@ -163,32 +177,16 @@ class MainActivity: FlutterActivity() {
         // Save the current list of alarms
         saveAlarmList()
         
-        // Set the alarm with multiple approaches for reliability
+        // Set the alarm - only set it once, no backup repeating alarms
+        // This prevents alarms from ringing multiple times
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             // For Android 12+, need to check if permission is granted
             if (alarmManager.canScheduleExactAlarms()) {
-                // Primary method: Exact and allow while idle
+                // Set exact alarm that allows while idle
                 alarmManager.setExactAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP,
                     calendar.timeInMillis,
                     pendingIntent
-                )
-                
-                // Secondary backup method: Set an inexact repeating alarm as well (daily)
-                val backupIntent = PendingIntent.getBroadcast(
-                    this,
-                    (hour * 100) + minute + 10000, // Different request code
-                    intent,
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) 
-                        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-                    else 
-                        PendingIntent.FLAG_UPDATE_CURRENT
-                )
-                alarmManager.setRepeating(
-                    AlarmManager.RTC_WAKEUP,
-                    calendar.timeInMillis,
-                    AlarmManager.INTERVAL_DAY,
-                    backupIntent
                 )
             } else {
                 // Request permission if not granted
@@ -202,28 +200,11 @@ class MainActivity: FlutterActivity() {
                 )
             }
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            // Primary method for Android 6.0+
+            // For Android 6.0+
             alarmManager.setExactAndAllowWhileIdle(
                 AlarmManager.RTC_WAKEUP,
                 calendar.timeInMillis,
                 pendingIntent
-            )
-            
-            // Secondary backup method: Set an inexact repeating alarm as well (daily)
-            val backupIntent = PendingIntent.getBroadcast(
-                this,
-                (hour * 100) + minute + 10000, // Different request code
-                intent,
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) 
-                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-                else 
-                    PendingIntent.FLAG_UPDATE_CURRENT
-            )
-            alarmManager.setRepeating(
-                AlarmManager.RTC_WAKEUP,
-                calendar.timeInMillis,
-                AlarmManager.INTERVAL_DAY,
-                backupIntent
             )
         } else {
             // For older Android versions
@@ -231,19 +212,6 @@ class MainActivity: FlutterActivity() {
                 AlarmManager.RTC_WAKEUP,
                 calendar.timeInMillis,
                 pendingIntent
-            )
-            
-            // Also set repeating alarm for added reliability
-            alarmManager.setRepeating(
-                AlarmManager.RTC_WAKEUP,
-                calendar.timeInMillis,
-                AlarmManager.INTERVAL_DAY,
-                PendingIntent.getBroadcast(
-                    this,
-                    (hour * 100) + minute + 10000,
-                    intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT
-                )
             )
         }
         
@@ -261,13 +229,15 @@ class MainActivity: FlutterActivity() {
         }
         val requestCode = (hour * 100) + minute
         
+        // Cancel the primary exact alarm
         val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.getBroadcast(this, requestCode, intent, PendingIntent.FLAG_IMMUTABLE)
+            PendingIntent.getBroadcast(this, requestCode, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         } else {
-            PendingIntent.getBroadcast(this, requestCode, intent, 0)
+            PendingIntent.getBroadcast(this, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT)
         }
         
         alarmManager.cancel(pendingIntent)
+        Log.d(TAG, "Cancelled alarm for $hour:$minute")
         
         // Remove from SharedPreferences
         val sharedPrefs = getSharedPreferences("alarm_prefs", Context.MODE_PRIVATE)
