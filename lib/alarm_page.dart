@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'theme_provider.dart';
 import 'package:provider/provider.dart';
 
@@ -15,13 +16,17 @@ class AlarmPage extends StatefulWidget {
 
 class AlarmGroup {
   final String title;
+  final String groupId;
   final List<Map<String, dynamic>> alarms;
   bool isExpanded;
+  bool isEnabled;
 
   AlarmGroup({
     required this.title,
+    required this.groupId,
     required this.alarms,
     this.isExpanded = false,
+    this.isEnabled = true,
   });
 }
 
@@ -40,12 +45,103 @@ class _AlarmPageState extends State<AlarmPage> {
   @override
   void initState() {
     super.initState();
+    _loadAlarmGroupMappings();
     _loadAlarms();
 
     // Initialize end time to be 1 hour after start time
     final now = TimeOfDay.now();
     _fromTime = now;
     _toTime = TimeOfDay(hour: (now.hour + 1) % 24, minute: now.minute);
+  }
+  
+  // Load alarm group mappings from SharedPreferences
+  Future<void> _loadAlarmGroupMappings() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final mappingsString = prefs.getString('alarm_group_mappings');
+      if (mappingsString != null && mappingsString.isNotEmpty) {
+        // Parse the string format: "hour:minute|groupId,hour:minute|groupId,..."
+        // Using | as separator between time and groupId to avoid conflicts with : in groupId
+        final Map<String, String> mappings = {};
+        final entries = mappingsString.split(',');
+        for (var entry in entries) {
+          final parts = entry.split('|');
+          if (parts.length == 2) {
+            final timeKey = parts[0]; // "hour:minute"
+            final groupId = parts[1]; // groupId
+            mappings[timeKey] = groupId;
+          }
+        }
+        _alarmToGroupMap = mappings;
+      }
+    } catch (e) {
+      print("Error loading alarm group mappings: $e");
+    }
+  }
+  
+  // Save alarm group mappings to SharedPreferences
+  Future<void> _saveAlarmGroupMappings() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      // Convert map to a simple string format: "hour:minute|groupId,hour:minute|groupId,..."
+      // Using | as separator to avoid conflicts with : in time format
+      final mappingsString = _alarmToGroupMap.entries
+          .map((e) => "${e.key}|${e.value}")
+          .join(',');
+      await prefs.setString('alarm_group_mappings', mappingsString);
+    } catch (e) {
+      print("Error saving alarm group mappings: $e");
+    }
+  }
+  
+  // Toggle alarm group on/off
+  Future<void> _toggleAlarmGroup(AlarmGroup group) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final newState = !group.isEnabled;
+      
+      setState(() {
+        group.isEnabled = newState;
+      });
+      
+      // Save the enabled state
+      await prefs.setBool('alarm_group_enabled_${group.groupId}', newState);
+      
+      // Save the updated groups (to persist the group structure)
+      await _saveAlarmGroups();
+      
+      if (newState) {
+        // Enable: Recreate all alarms in the group
+        for (var alarm in group.alarms) {
+          await platform.invokeMethod('setAlarm', {
+            'hour': alarm['hour'],
+            'minute': alarm['minute'],
+          });
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("${group.title} enabled")),
+        );
+      } else {
+        // Disable: Delete all alarms in the group (but keep them in memory)
+        for (var alarm in group.alarms) {
+          await platform.invokeMethod('deleteAlarm', {
+            'hour': alarm['hour'],
+            'minute': alarm['minute'],
+          });
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("${group.title} disabled")),
+        );
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Failed to toggle alarm group: $e")),
+      );
+      // Revert on error
+      setState(() {
+        group.isEnabled = !group.isEnabled;
+      });
+    }
   }
 
   // Format time to 12-hour format
@@ -57,38 +153,39 @@ class _AlarmPageState extends State<AlarmPage> {
 
   Future<void> _loadAlarms() async {
     try {
-      final List<dynamic> alarms = await platform.invokeMethod('getAlarms');
-      setState(() {
-        // Convert raw alarms to our structured format
-        _alarms =
-            alarms
-                .map((alarm) {
-                  final parts = alarm.toString().split(':');
-                  if (parts.length == 2) {
-                    final hour = int.parse(parts[0]);
-                    final minute = int.parse(parts[1]);
-                    return {
-                      'rawTime': alarm,
-                      'formattedTime': _formatTime(hour, minute),
-                      'hour': hour,
-                      'minute': minute,
-                      'groupId':
-                          _alarmToGroupMap[alarm] ??
-                          'single', // Default to 'single' if not in a group
-                    };
-                  }
+      final List<dynamic> activeAlarms = await platform.invokeMethod('getAlarms');
+      
+      // Convert active alarms to our structured format
+      final activeAlarmsList =
+          activeAlarms
+              .map((alarm) {
+                final parts = alarm.toString().split(':');
+                if (parts.length == 2) {
+                  final hour = int.parse(parts[0]);
+                  final minute = int.parse(parts[1]);
                   return {
                     'rawTime': alarm,
-                    'formattedTime': alarm,
-                    'groupId': 'single',
+                    'formattedTime': _formatTime(hour, minute),
+                    'hour': hour,
+                    'minute': minute,
+                    'groupId':
+                        _alarmToGroupMap[alarm] ??
+                        'single', // Default to 'single' if not in a group
                   };
-                })
-                .toList()
-                .cast<Map<String, dynamic>>();
+                }
+                return {
+                  'rawTime': alarm,
+                  'formattedTime': alarm,
+                  'groupId': 'single',
+                };
+              })
+              .toList()
+              .cast<Map<String, dynamic>>();
 
-        // Organize alarms into groups
-        _organizeAlarmGroups();
-      });
+      // Load stored alarm groups (includes disabled groups)
+      await _loadStoredAlarmGroups(activeAlarmsList);
+      
+      setState(() {});
     } on PlatformException catch (e) {
       print("Failed to load alarms: '${e.message}'.");
     } on MissingPluginException catch (e) {
@@ -99,16 +196,109 @@ class _AlarmPageState extends State<AlarmPage> {
       });
     }
   }
+  
+  // Load stored alarm groups from SharedPreferences
+  Future<void> _loadStoredAlarmGroups(List<Map<String, dynamic>> activeAlarms) async {
+    final prefs = await SharedPreferences.getInstance();
+    
+    // Get all stored group IDs
+    final storedGroupsJson = prefs.getString('stored_alarm_groups');
+    if (storedGroupsJson == null || storedGroupsJson.isEmpty) {
+      // No stored groups, organize from active alarms only
+      _alarms = activeAlarms;
+      await _organizeAlarmGroups();
+      // Save the organized groups for next time
+      await _saveAlarmGroups();
+      return;
+    }
+    
+    // Parse stored groups: "groupId|alarm1,alarm2,alarm3;groupId2|alarm1,alarm2;..."
+    final Map<String, List<Map<String, dynamic>>> storedGroups = {};
+    final groupStrings = storedGroupsJson.split(';');
+    
+    for (var groupString in groupStrings) {
+      if (groupString.isEmpty) continue;
+      final parts = groupString.split('|');
+      if (parts.length == 2) {
+        final groupId = parts[0];
+        final alarmsString = parts[1];
+        if (alarmsString.isNotEmpty) {
+          final alarmTimes = alarmsString.split(',');
+          final alarms = alarmTimes.map((time) {
+            final timeParts = time.split(':');
+            if (timeParts.length == 2) {
+              final hour = int.parse(timeParts[0]);
+              final minute = int.parse(timeParts[1]);
+              return {
+                'rawTime': time,
+                'formattedTime': _formatTime(hour, minute),
+                'hour': hour,
+                'minute': minute,
+                'groupId': groupId,
+              };
+            }
+            return null;
+          }).where((a) => a != null).cast<Map<String, dynamic>>().toList();
+          storedGroups[groupId] = alarms;
+        }
+      }
+    }
+    
+    // Merge stored groups with active alarms
+    // Use stored groups as base, but mark which alarms are active
+    final allAlarms = <String, Map<String, dynamic>>{};
+    
+    // Add all stored alarms
+    for (var group in storedGroups.values) {
+      for (var alarm in group) {
+        allAlarms[alarm['rawTime']] = alarm;
+      }
+    }
+    
+    // Update with active alarm status
+    for (var activeAlarm in activeAlarms) {
+      allAlarms[activeAlarm['rawTime']] = activeAlarm;
+    }
+    
+    _alarms = allAlarms.values.toList();
+    await _organizeAlarmGroups();
+  }
+  
+  // Save alarm groups to SharedPreferences
+  Future<void> _saveAlarmGroups() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      
+      // Save groups in format: "groupId|alarm1,alarm2,alarm3;groupId2|alarm1,alarm2;..."
+      final List<String> groupStrings = [];
+      
+      for (var group in _alarmGroups) {
+        final alarmTimes = group.alarms
+            .map((a) => a['rawTime'].toString())
+            .join(',');
+        groupStrings.add("${group.groupId}|$alarmTimes");
+      }
+      
+      await prefs.setString('stored_alarm_groups', groupStrings.join(';'));
+    } catch (e) {
+      print("Error saving alarm groups: $e");
+    }
+  }
 
   // Organize alarms into their respective groups
-  void _organizeAlarmGroups() {
-    // Create a list to store current expanded states
+  Future<void> _organizeAlarmGroups() async {
+    // Create a list to store current expanded states and enabled states
     Map<String, bool> expandedStates = {};
+    Map<String, bool> enabledStates = {};
 
-    // Save current expanded states before rebuilding groups
+    // Save current states before rebuilding groups
     for (var group in _alarmGroups) {
-      expandedStates[group.title] = group.isExpanded;
+      expandedStates[group.groupId] = group.isExpanded;
+      enabledStates[group.groupId] = group.isEnabled;
     }
+    
+    // Load enabled states from SharedPreferences
+    final prefs = await SharedPreferences.getInstance();
 
     // Reset the groups
     _alarmGroups = [];
@@ -162,14 +352,15 @@ class _AlarmPageState extends State<AlarmPage> {
 
     // Create single alarm group if any exist
     if (groupedAlarms.containsKey('single')) {
+      final groupId = 'single';
       final title = "Individual Alarms";
       _alarmGroups.add(
         AlarmGroup(
           title: title,
+          groupId: groupId,
           alarms: groupedAlarms['single'] ?? [],
-          isExpanded:
-              expandedStates[title] ??
-              true, // Use saved state or default to true
+          isExpanded: expandedStates[groupId] ?? true,
+          isEnabled: prefs.getBool('alarm_group_enabled_$groupId') ?? true,
         ),
       );
     }
@@ -179,18 +370,51 @@ class _AlarmPageState extends State<AlarmPage> {
       if (groupId != 'single' && alarms.isNotEmpty) {
         final info = groupInfo[groupId];
         final title = info?['title'] ?? "Interval Alarms";
+        final isEnabled = prefs.getBool('alarm_group_enabled_$groupId') ?? true;
 
         _alarmGroups.add(
           AlarmGroup(
             title: title,
+            groupId: groupId,
             alarms: alarms,
-            isExpanded:
-                expandedStates[title] ??
-                false, // Use saved state or default to false
+            isExpanded: expandedStates[groupId] ?? false,
+            isEnabled: isEnabled,
           ),
         );
+        
+        // If group is disabled, make sure alarms are deleted from AlarmManager
+        if (!isEnabled) {
+          // Delete alarms in disabled groups (they might have been restored on boot)
+          for (var alarm in alarms) {
+            platform.invokeMethod('deleteAlarm', {
+              'hour': alarm['hour'],
+              'minute': alarm['minute'],
+            }).catchError((e) {
+              print("Error deleting disabled alarm: $e");
+            });
+          }
+        }
       }
     });
+    
+    // Also check individual alarms group
+    if (groupedAlarms.containsKey('single')) {
+      final isEnabled = prefs.getBool('alarm_group_enabled_single') ?? true;
+      if (!isEnabled) {
+        // Delete individual alarms if group is disabled
+        for (var alarm in groupedAlarms['single'] ?? []) {
+          platform.invokeMethod('deleteAlarm', {
+            'hour': alarm['hour'],
+            'minute': alarm['minute'],
+          }).catchError((e) {
+            print("Error deleting disabled alarm: $e");
+          });
+        }
+      }
+    }
+    
+    // Save the organized groups
+    await _saveAlarmGroups();
   }
 
   // Delete all alarms in a group
@@ -205,13 +429,20 @@ class _AlarmPageState extends State<AlarmPage> {
         // Remove from tracking map
         _alarmToGroupMap.remove(alarm['rawTime']);
       }
+      
+      // Save the updated group mappings
+      await _saveAlarmGroupMappings();
+      
+      // Remove group from stored groups
+      _alarmGroups.removeWhere((g) => g.groupId == group.groupId);
+      await _saveAlarmGroups();
 
       // Update UI
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("${group.alarms.length} alarms deleted")),
       );
 
-      _loadAlarms();
+      setState(() {});
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Failed to delete alarm group: $e")),
@@ -225,6 +456,18 @@ class _AlarmPageState extends State<AlarmPage> {
         'hour': alarm['hour'],
         'minute': alarm['minute'],
       });
+      
+      // Remove from tracking map
+      _alarmToGroupMap.remove(alarm['rawTime']);
+      await _saveAlarmGroupMappings();
+      
+      // Remove from stored groups and save
+      for (var group in _alarmGroups) {
+        group.alarms.removeWhere((a) => a['rawTime'] == alarm['rawTime']);
+      }
+      _alarmGroups.removeWhere((group) => group.alarms.isEmpty);
+      await _saveAlarmGroups();
+      
       _loadAlarms();
     } on PlatformException catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -271,6 +514,15 @@ class _AlarmPageState extends State<AlarmPage> {
         // Map this alarm to the group
         _alarmToGroupMap["$hour:$minute"] = groupId;
       }
+      
+      // Save the group mappings
+      await _saveAlarmGroupMappings();
+      
+      // Refresh alarms list to update groups
+      await _loadAlarms();
+      
+      // Save the updated groups
+      await _saveAlarmGroups();
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -279,9 +531,6 @@ class _AlarmPageState extends State<AlarmPage> {
           ),
         ),
       );
-
-      // Refresh alarms list
-      _loadAlarms();
     } on PlatformException catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -473,11 +722,20 @@ class _AlarmPageState extends State<AlarmPage> {
                               ListTile(
                                 title: Text(
                                   group.title,
-                                  style: TextStyle(fontWeight: FontWeight.bold),
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    color: group.isEnabled ? null : Colors.grey,
+                                  ),
                                 ),
                                 trailing: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
+                                    // On/Off Switch
+                                    Switch(
+                                      value: group.isEnabled,
+                                      onChanged: (value) => _toggleAlarmGroup(group),
+                                    ),
+                                    const SizedBox(width: 8),
                                     // Delete button (red)
                                     IconButton(
                                       icon: Icon(
