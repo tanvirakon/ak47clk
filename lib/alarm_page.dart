@@ -4,7 +4,6 @@ import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:intl/intl.dart';
-import 'settings_page.dart';
 import 'wheel_time_picker.dart';
 
 class AlarmPage extends StatefulWidget {
@@ -19,11 +18,15 @@ class AlarmGroup {
   final int id;
   final int? fromHour, fromMinute, toHour, toMinute, interval;
   final List<Map<String, dynamic>> alarms; // {id, hour, minute, formattedTime}
+  final bool single; // normal one-time alarm
+  final String? label;
   bool isEnabled;
   bool isExpanded;
 
   AlarmGroup({
     required this.id,
+    this.single = false,
+    this.label,
     this.fromHour,
     this.fromMinute,
     this.toHour,
@@ -41,6 +44,7 @@ class AlarmGroup {
       isInterval && (toHour! * 60 + toMinute!) < (fromHour! * 60 + fromMinute!);
 
   String get title {
+    if (single && alarms.isNotEmpty) return alarms.first['formattedTime'] as String;
     if (!isInterval) return 'Individual alarms';
     return '${_fmt(fromHour!, fromMinute!)} – ${_fmt(toHour!, toMinute!)}';
   }
@@ -48,8 +52,17 @@ class AlarmGroup {
   static String _fmt(int h, int m) =>
       DateFormat('h:mm a').format(DateTime(2000, 1, 1, h, m));
 
+  /// Minutes past midnight of the first alarm (for sorting the list by time).
+  int get sortKey {
+    if (isInterval) return fromHour! * 60 + fromMinute!;
+    if (alarms.isEmpty) return 0;
+    return (alarms.first['hour'] as int) * 60 + (alarms.first['minute'] as int);
+  }
+
   factory AlarmGroup.fromJson(Map<String, dynamic> j) => AlarmGroup(
         id: j['id'] as int,
+        single: j['single'] as bool? ?? false,
+        label: j['label'] as String?,
         fromHour: j['fromHour'] as int?,
         fromMinute: j['fromMinute'] as int?,
         toHour: j['toHour'] as int?,
@@ -77,12 +90,16 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
   // Re-check when user comes back from the MIUI permission screen.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _checkLockScreenPermission();
+    if (state == AppLifecycleState.resumed) {
+      _checkLockScreenPermission();
+      _loadAlarms(); // a single alarm may have rung and switched itself off
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _labelCtrl.dispose();
     super.dispose();
   }
 
@@ -133,6 +150,11 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
   int _intervalMinutes = 10;
   List<AlarmGroup> _alarmGroups = [];
 
+  // Single (one-time) alarm draft
+  bool _singleMode = true;
+  TimeOfDay _singleTime = TimeOfDay.now();
+  final TextEditingController _labelCtrl = TextEditingController();
+
   @override
   void initState() {
     super.initState();
@@ -163,6 +185,7 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
       for (final g in groups) {
         g.isExpanded = expanded[g.id] ?? false;
       }
+      groups.sort((a, b) => a.sortKey.compareTo(b.sortKey)); // one list, by time
       if (mounted) setState(() => _alarmGroups = groups);
     } catch (e) {
       debugPrint('Failed to load alarms: $e');
@@ -184,7 +207,7 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
     setState(() => _alarmGroups.removeWhere((g) => g.id == group.id));
     try {
       await platform.invokeMethod('deleteGroup', {'groupId': group.id});
-      _toast('${group.alarms.length} alarms deleted');
+      _toast(group.alarms.length == 1 ? 'Alarm deleted' : '${group.alarms.length} alarms deleted');
     } catch (e) {
       _toast('Failed to delete: $e');
     }
@@ -213,6 +236,27 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
       _toast('$count alarms set, every $_intervalMinutes min');
     } catch (e) {
       _toast('Failed to set alarms: $e');
+    }
+  }
+
+  Future<void> _saveSingle({AlarmGroup? edit}) async {
+    final label = _labelCtrl.text.trim();
+    try {
+      await platform.invokeMethod(edit == null ? 'createSingle' : 'updateSingle', {
+        if (edit != null) 'groupId': edit.id,
+        'hour': _singleTime.hour,
+        'minute': _singleTime.minute,
+        'label': label.isEmpty ? null : label,
+      });
+      await _loadAlarms();
+      final now = DateTime.now();
+      var at = DateTime(now.year, now.month, now.day, _singleTime.hour, _singleTime.minute);
+      if (!at.isAfter(now)) at = at.add(const Duration(days: 1));
+      final d = at.difference(now);
+      final h = d.inHours, m = d.inMinutes % 60;
+      _toast(h == 0 ? 'Alarm in ${m == 0 ? 1 : m} min' : 'Alarm in ${h}h ${m}m');
+    } catch (e) {
+      _toast('Failed to set alarm: $e');
     }
   }
 
@@ -259,30 +303,16 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 12, 8, 0),
-              child: Row(
-                children: [
-                  const Expanded(
-                    child: Text(
-                      'Alarms',
-                      style: TextStyle(fontSize: 34, fontWeight: FontWeight.w400),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.settings_outlined),
-                    tooltip: 'Settings',
-                    onPressed: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (_) => const SettingsPage()),
-                    ),
-                  ),
-                ],
+            // Title removed; settings gear lives in HomeShell (fixed across tabs). Right pad clears it.
+            SizedBox(
+              height: 56,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 0, 64, 0),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(_countdownText(), style: TextStyle(color: dim, fontSize: 15)),
+                ),
               ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 4, 24, 16),
-              child: Text(_countdownText(), style: TextStyle(color: dim, fontSize: 15)),
             ),
             if (!_lockScreenOk) _lockScreenBanner(),
             Expanded(child: _buildAlarmsList()),
@@ -375,8 +405,10 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
           color: Colors.transparent,
           child: InkWell(
             borderRadius: BorderRadius.circular(24),
-            onTap: () => setState(() => group.isExpanded = !group.isExpanded),
-            child: Padding(
+            onTap: group.single
+                ? () => _openAddBubble(edit: group)
+                : () => setState(() => group.isExpanded = !group.isExpanded),
+            child: group.single ? _singleContent(group, fg, dim) : Padding(
               padding: const EdgeInsets.fromLTRB(20, 18, 12, 18),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -431,6 +463,45 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
     );
   }
 
+  /// Card body for a normal one-time alarm: big time, label, switch.
+  Widget _singleContent(AlarmGroup group, Color fg, Color dim) {
+    final on = group.isEnabled;
+    final a = group.alarms.isNotEmpty ? group.alarms.first : null;
+    final dt = DateTime(2000, 1, 1, (a?['hour'] as int?) ?? 0, (a?['minute'] as int?) ?? 0);
+    final sub = (group.label?.isNotEmpty ?? false) ? '${group.label} · Once' : 'Once';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 14, 12, 14),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(DateFormat('h:mm').format(dt),
+                        style: TextStyle(fontSize: 38, fontWeight: FontWeight.w300, color: on ? fg : dim)),
+                    const SizedBox(width: 6),
+                    Text(DateFormat('a').format(dt),
+                        style: TextStyle(fontSize: 14, color: dim)),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(sub,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: dim, fontSize: 13)),
+              ],
+            ),
+          ),
+          Switch(value: on, onChanged: (_) => _toggleAlarmGroup(group)),
+        ],
+      ),
+    );
+  }
+
   Widget _alarmChip(Map<String, dynamic> alarm, bool isDark, Color dim) {
     return Container(
       padding: const EdgeInsets.only(left: 12, right: 4),
@@ -454,7 +525,17 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
   }
 
   /// Opens the "liquid bubble" add card: grows out of the + button with an elastic pop.
-  Future<void> _openAddBubble() async {
+  Future<void> _openAddBubble({AlarmGroup? edit}) async {
+    // Fresh draft each time; prefill when editing a single alarm.
+    if (edit != null && edit.alarms.isNotEmpty) {
+      _singleMode = true;
+      _singleTime = TimeOfDay(
+          hour: edit.alarms.first['hour'] as int, minute: edit.alarms.first['minute'] as int);
+      _labelCtrl.text = edit.label ?? '';
+    } else {
+      _singleTime = TimeOfDay.now();
+      _labelCtrl.clear();
+    }
     final saved = await showGeneralDialog<bool>(
       context: context,
       barrierDismissible: true,
@@ -462,9 +543,13 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
       barrierColor: Colors.black.withValues(alpha: 0.45),
       transitionDuration: const Duration(milliseconds: 320),
       // Card built once here (not every animation frame) and cached in its own layer.
-      pageBuilder: (ctx, _, __) => Align(
-        alignment: Alignment.bottomCenter,
-        child: RepaintBoundary(child: _addBubbleCard(ctx)),
+      pageBuilder: (ctx, _, __) => Padding(
+        // lift the card above the keyboard when typing a label
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: Align(
+          alignment: Alignment.bottomCenter,
+          child: RepaintBoundary(child: _addBubbleCard(ctx, edit: edit)),
+        ),
       ),
       transitionBuilder: (ctx, anim, _, child) {
         final curved = CurvedAnimation(
@@ -479,10 +564,51 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
         );
       },
     );
-    if (saved == true) await _setIntervalAlarms();
+    if (saved != true) return;
+    if (_singleMode) {
+      await _saveSingle(edit: edit);
+    } else {
+      await _setIntervalAlarms();
+    }
   }
 
-  Widget _addBubbleCard(BuildContext ctx) {
+  /// Single | Interval segmented switch at the top of the add card.
+  Widget _modeSwitch(bool isDark, Color accent, Color fg, Color dim, void Function(bool) onPick) {
+    Widget seg(String text, bool single) {
+      final sel = _singleMode == single;
+      return Expanded(
+        child: GestureDetector(
+          onTap: () => onPick(single),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            decoration: BoxDecoration(
+              color: sel ? accent : Colors.transparent,
+              borderRadius: BorderRadius.circular(24),
+            ),
+            alignment: Alignment.center,
+            child: Text(text,
+                style: TextStyle(
+                  fontWeight: FontWeight.w500,
+                  color: sel ? (isDark ? Colors.black : Colors.white) : dim,
+                )),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: isDark ? Colors.white10 : Colors.black.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(28),
+      ),
+      child: Row(children: [seg('Single', true), seg('Interval', false)]),
+    );
+  }
+
+  Widget _addBubbleCard(BuildContext ctx, {AlarmGroup? edit}) {
     final isDark = Theme.of(ctx).brightness == Brightness.dark;
     final fg = isDark ? Colors.white : Colors.black87;
     final dim = isDark ? Colors.white54 : Colors.black54;
@@ -537,13 +663,40 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
                       }
                     }
 
+                    Future<void> pickSingle() async {
+                      final picked = await showWheelTimePicker(
+                        ctx,
+                        initialTime: _singleTime,
+                        title: 'Alarm time',
+                      );
+                      if (picked != null) setLocal(() => _singleTime = picked);
+                    }
+
+                    final singleBody = <Widget>[
+                      Center(child: _timeTile('Rings at', _singleTime, pickSingle, fg, dim, big: true)),
+                      // Label field removed from UI for now; native label support kept.
+                    ];
+
                     return Column(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('New interval alarm',
-                            style: TextStyle(color: dim, fontSize: 14)),
+                        if (edit == null)
+                          _modeSwitch(isDark, accent, fg, dim, (s) {
+                            FocusScope.of(ctx).unfocus();
+                            setLocal(() => _singleMode = s);
+                          })
+                        else
+                          Text('Edit alarm', style: TextStyle(color: dim, fontSize: 14)),
                         const SizedBox(height: 16),
+                        AnimatedSize(
+                          duration: const Duration(milliseconds: 200),
+                          curve: Curves.easeOut,
+                          alignment: Alignment.topCenter,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: _singleMode ? singleBody : [
                         Row(
                           children: [
                             Expanded(child: _timeTile('From', _fromTime, () => pick(true), fg, dim)),
@@ -574,6 +727,9 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
                             );
                           }).toList(),
                         ),
+                            ],
+                          ),
+                        ),
                         const SizedBox(height: 24),
                         Row(
                           children: [
@@ -583,7 +739,9 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
                             ),
                             const SizedBox(width: 12),
                             Expanded(
-                              child: _pill('Set alarms', accent, isDark ? Colors.black : Colors.white,
+                              child: _pill(
+                                  edit != null ? 'Save' : (_singleMode ? 'Set alarm' : 'Set alarms'),
+                                  accent, isDark ? Colors.black : Colors.white,
                                   () => Navigator.pop(ctx, true)),
                             ),
                           ],
@@ -601,7 +759,8 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _timeTile(String label, TimeOfDay t, VoidCallback onTap, Color fg, Color dim) {
+  Widget _timeTile(String label, TimeOfDay t, VoidCallback onTap, Color fg, Color dim,
+      {bool big = false}) {
     final h = t.hourOfPeriod == 0 ? 12 : t.hourOfPeriod;
     return InkWell(
       borderRadius: BorderRadius.circular(16),
@@ -618,7 +777,7 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
               textBaseline: TextBaseline.alphabetic,
               children: [
                 Text('$h:${t.minute.toString().padLeft(2, '0')}',
-                    style: TextStyle(fontSize: 34, fontWeight: FontWeight.w300, color: fg)),
+                    style: TextStyle(fontSize: big ? 56 : 34, fontWeight: FontWeight.w300, color: fg)),
                 const SizedBox(width: 4),
                 Text(t.period == DayPeriod.am ? 'AM' : 'PM',
                     style: TextStyle(fontSize: 13, color: dim)),

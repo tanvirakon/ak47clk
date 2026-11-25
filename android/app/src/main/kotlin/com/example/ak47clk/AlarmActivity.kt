@@ -73,6 +73,18 @@ class AlarmActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.dateTextView).text =
             SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(Calendar.getInstance().time)
 
+        // Show the alarm's label (if any) under the date.
+        val alarmId = intent.getIntExtra(AlarmScheduler.EXTRA_ID, -1)
+        val label = try {
+            if (alarmId != -1) AlarmStore.findByAlarmId(this, alarmId)?.label else null
+        } catch (e: Exception) { null }
+        if (!label.isNullOrBlank()) {
+            findViewById<TextView>(R.id.labelTextView).apply {
+                text = label
+                visibility = android.view.View.VISIBLE
+            }
+        }
+
         setupSwipeToDismiss(hour, minute)
         quietServiceNotification()
 

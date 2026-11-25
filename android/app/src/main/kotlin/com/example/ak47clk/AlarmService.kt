@@ -137,6 +137,7 @@ class AlarmService : Service() {
         val alarmIntent = Intent(this, AlarmActivity::class.java).apply {
             putExtra("HOUR", hour)
             putExtra("MINUTE", minute)
+            putExtra(AlarmScheduler.EXTRA_ID, intent?.getIntExtra(AlarmScheduler.EXTRA_ID, -1) ?: -1)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or 
                     Intent.FLAG_ACTIVITY_CLEAR_TOP or
                     Intent.FLAG_ACTIVITY_SINGLE_TOP or

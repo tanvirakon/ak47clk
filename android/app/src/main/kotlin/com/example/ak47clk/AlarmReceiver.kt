@@ -29,7 +29,15 @@ class AlarmReceiver : BroadcastReceiver() {
         
         val hour = intent.getIntExtra("HOUR", 0)
         val minute = intent.getIntExtra("MINUTE", 0)
-        
+        val alarmId = intent.getIntExtra(AlarmScheduler.EXTRA_ID, -1)
+
+        // A single (one-time) alarm switches itself off once it rings.
+        if (alarmId != -1) {
+            try { AlarmStore.onFired(context, alarmId) } catch (e: Exception) {
+                Log.e("AlarmReceiver", "onFired failed", e)
+            }
+        }
+
         // Get a WakeLock to ensure the device wakes up
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         val wakeLock = powerManager.newWakeLock(
@@ -44,6 +52,7 @@ class AlarmReceiver : BroadcastReceiver() {
             val serviceIntent = Intent(context, AlarmService::class.java).apply {
                 putExtra("HOUR", hour)
                 putExtra("MINUTE", minute)
+                putExtra(AlarmScheduler.EXTRA_ID, alarmId)
             }
             
             // Start the foreground service (this will handle launching the activity)

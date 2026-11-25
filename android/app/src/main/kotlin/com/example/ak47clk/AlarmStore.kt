@@ -30,6 +30,8 @@ object AlarmStore {
         val interval: Int?,
         var enabled: Boolean,
         val alarms: MutableList<Alarm>,
+        val single: Boolean = false,   // normal one-time alarm (one time, turns itself off after ringing)
+        val label: String? = null,
     )
 
     private fun prefs(c: Context) = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -102,6 +104,47 @@ object AlarmStore {
         return g
     }
 
+    private fun cleanLabel(label: String?) = label?.trim()?.take(60)?.ifEmpty { null }
+
+    /** Normal one-time alarm. */
+    fun createSingle(c: Context, h: Int, m: Int, label: String?): Group {
+        val groups = load(c)
+        val g = Group(
+            id = newId(c), fromHour = null, fromMinute = null, toHour = null, toMinute = null,
+            interval = null, enabled = true, alarms = mutableListOf(Alarm(newId(c), h, m)),
+            single = true, label = cleanLabel(label),
+        )
+        groups.add(g)
+        save(c, groups)
+        return g
+    }
+
+    /** Change time/label of a single alarm. Keeps its alarm id; turns it back on. Returns the new alarm. */
+    fun updateSingle(c: Context, groupId: Int, h: Int, m: Int, label: String?): Alarm? {
+        val groups = load(c)
+        val i = groups.indexOfFirst { it.id == groupId && it.single }
+        if (i < 0) return null
+        val old = groups[i]
+        val alarm = Alarm(old.alarms.firstOrNull()?.id ?: newId(c), h, m)
+        groups[i] = old.copy(enabled = true, alarms = mutableListOf(alarm), label = cleanLabel(label))
+        save(c, groups)
+        return alarm
+    }
+
+    /** Called when an alarm rings: a single alarm switches itself off. Returns its group. */
+    fun onFired(c: Context, alarmId: Int): Group? {
+        val groups = load(c)
+        val g = groups.find { gr -> gr.alarms.any { it.id == alarmId } } ?: return null
+        if (g.single && g.enabled) {
+            g.enabled = false
+            save(c, groups)
+        }
+        return g
+    }
+
+    fun findByAlarmId(c: Context, alarmId: Int): Group? =
+        load(c).find { gr -> gr.alarms.any { it.id == alarmId } }
+
     // ---------------- JSON ----------------
 
     private fun groupToJson(g: Group) = JSONObject().apply {
@@ -112,6 +155,8 @@ object AlarmStore {
         g.toMinute?.let { put("toMinute", it) }
         g.interval?.let { put("interval", it) }
         put("enabled", g.enabled)
+        if (g.single) put("single", true)
+        g.label?.let { put("label", it) }
         put("alarms", JSONArray().apply {
             g.alarms.forEach { a ->
                 put(JSONObject().put("id", a.id).put("hour", a.hour).put("minute", a.minute))
@@ -132,6 +177,8 @@ object AlarmStore {
                 val a = arr.getJSONObject(i)
                 Alarm(a.getInt("id"), a.getInt("hour"), a.getInt("minute"))
             },
+            single = o.optBoolean("single", false),
+            label = if (o.has("label")) o.getString("label") else null,
         )
     }
 

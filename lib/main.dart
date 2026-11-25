@@ -1,7 +1,7 @@
 // lib/main.dart
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'alarm_page.dart';
+import 'home_shell.dart';
 import 'theme_provider.dart';
 
 void main() {
@@ -24,7 +24,7 @@ class MyApp extends StatelessWidget {
             theme: _buildLightTheme(),
             darkTheme: _buildDarkTheme(),
             themeMode: themeProvider.isDarkMode ? ThemeMode.dark : ThemeMode.light,
-            home: const AlarmPage(),
+            home: const HomeShell(),
           );
         },
       ),
@@ -116,6 +116,21 @@ class MyApp extends StatelessWidget {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       ),
       dividerColor: isDark ? Colors.white12 : Colors.black12,
+      navigationBarTheme: NavigationBarThemeData(
+        backgroundColor: bg,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        height: 68,
+        indicatorColor: accent.withValues(alpha: isDark ? 0.22 : 0.14),
+        iconTheme: WidgetStateProperty.resolveWith((s) => IconThemeData(
+              color: s.contains(WidgetState.selected) ? accent : fg.withValues(alpha: 0.55),
+            )),
+        labelTextStyle: WidgetStateProperty.resolveWith((s) => TextStyle(
+              fontSize: 12,
+              fontWeight: s.contains(WidgetState.selected) ? FontWeight.w600 : FontWeight.w400,
+              color: s.contains(WidgetState.selected) ? accent : fg.withValues(alpha: 0.55),
+            )),
+      ),
     );
   }
 }

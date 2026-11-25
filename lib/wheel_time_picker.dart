@@ -1,5 +1,14 @@
 // lib/wheel_time_picker.dart
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+const _tickChannel = MethodChannel('com.example.ak47clk/alarm');
+
+/// Dial "tick": short click sound (native SoundPool, system volume) + light haptic.
+void _wheelTick() {
+  HapticFeedback.selectionClick();
+  _tickChannel.invokeMethod('wheelTick').catchError((_) => null);
+}
 
 /// Bottom-sheet wheel time picker (AM/PM | hour | minute).
 Future<TimeOfDay?> showWheelTimePicker(
@@ -216,7 +225,10 @@ class _WheelTimePickerSheetState extends State<_WheelTimePickerSheet> {
       diameterRatio: 2.5,
       perspective: 0.002,
       overAndUnderCenterOpacity: 0.8,
-      onSelectedItemChanged: (raw) => onChanged(((raw % count) + count) % count),
+      onSelectedItemChanged: (raw) {
+        _wheelTick();
+        onChanged(((raw % count) + count) % count);
+      },
       childDelegate: looping
           ? ListWheelChildLoopingListDelegate(children: children)
           : ListWheelChildListDelegate(children: children),

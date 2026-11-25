@@ -92,6 +92,20 @@
             android:text="Tuesday, 25 November"
             android:textColor="#8CFFFFFF"
             android:textSize="15sp" />
+
+        <TextView
+            android:id="@+id/labelTextView"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:paddingHorizontal="32dp"
+            android:gravity="center"
+            android:maxLines="2"
+            android:ellipsize="end"
+            android:fontFamily="sans-serif"
+            android:textColor="#E6FFFFFF"
+            android:textSize="20sp"
+            android:visibility="gone" />
     </LinearLayout>
 
     <!-- Swipe-up hint + pill -->

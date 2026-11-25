@@ -26,6 +26,9 @@ class MainActivity : FlutterActivity() {
         requestBatteryOptimizationExemption()
         requestOverlayPermission()
         requestExactAlarmPermissionIfNeeded()
+        requestNotificationPermissionIfNeeded()
+        requestFullScreenIntentIfNeeded()
+        TickSound.init(this)
 
         // Import alarms from the old storage format once, and schedule them under new ids.
         if (AlarmStore.migrateIfNeeded(this)) AlarmScheduler.rescheduleAll(this)
@@ -45,6 +48,27 @@ class MainActivity : FlutterActivity() {
                         )
                         g.alarms.forEach { AlarmScheduler.schedule(this, it) }
                         result.success(g.alarms.size)
+                    }
+
+                    "createSingle" -> {
+                        val g = AlarmStore.createSingle(
+                            this,
+                            call.argument<Int>("hour")!!, call.argument<Int>("minute")!!,
+                            call.argument<String>("label"),
+                        )
+                        g.alarms.forEach { AlarmScheduler.schedule(this, it) }
+                        result.success(true)
+                    }
+
+                    "updateSingle" -> {
+                        val a = AlarmStore.updateSingle(
+                            this, call.argument<Int>("groupId")!!,
+                            call.argument<Int>("hour")!!, call.argument<Int>("minute")!!,
+                            call.argument<String>("label"),
+                        )
+                        // Same id = same PendingIntent, so this replaces the old trigger time.
+                        a?.let { AlarmScheduler.schedule(this, it) }
+                        result.success(a != null)
                     }
 
                     "setGroupEnabled" -> {
@@ -118,6 +142,8 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    "wheelTick" -> { TickSound.play(); result.success(null) }
+
                     // ---------- MIUI lock screen ----------
                     "lockScreenPermissionOk" -> result.success(MiuiPermissions.allGranted(this))
                     "openLockScreenPermission" -> { MiuiPermissions.openEditor(this); result.success(true) }
@@ -185,6 +211,26 @@ class MainActivity : FlutterActivity() {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         } catch (e: Exception) {
             Log.e(TAG, "Overlay permission request failed", e)
+        }
+    }
+
+    /** Android 13+: notifications are opt-in; the ringing alarm uses one. */
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < 33) return
+        if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED) return
+        requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 4749)
+    }
+
+    /** Android 14+: full-screen alarm over the lock screen can be switched off per app. */
+    private fun requestFullScreenIntentIfNeeded() {
+        if (Build.VERSION.SDK_INT < 34) return
+        val nm = getSystemService(android.app.NotificationManager::class.java)
+        if (nm.canUseFullScreenIntent()) return
+        try {
+            startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:$packageName")))
+        } catch (e: Exception) {
+            Log.e(TAG, "Full-screen intent settings failed", e)
         }
     }
 
