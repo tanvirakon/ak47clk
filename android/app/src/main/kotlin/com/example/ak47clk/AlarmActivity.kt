@@ -32,31 +32,19 @@ class AlarmActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // Set up the window to appear over EVERYTHING including lock screen and other apps
+        // Show ON TOP of the lock screen and wake the display - WITHOUT dismissing the keyguard.
+        // (Dismissing it forces the PIN/fingerprint prompt, which is exactly what we don't want:
+        //  the alarm must be visible and stoppable while the phone stays locked.)
         window.addFlags(
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
-            WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
             WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
             WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
             WindowManager.LayoutParams.FLAG_FULLSCREEN or
             WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
         )
-        
-        // Modern API for appearing over lock screen and other apps
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
-            
-            // Force unlock the keyguard
-            val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
-            if (keyguardManager.isKeyguardLocked) {
-                keyguardManager.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
-                    override fun onDismissError() {
-                        // If dismissal fails, use older method as fallback
-                        window.addFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD)
-                    }
-                })
-            }
         }
         
         // Use a wake lock to keep the CPU running
@@ -78,29 +66,199 @@ class AlarmActivity : AppCompatActivity() {
             set(Calendar.HOUR_OF_DAY, hour)
             set(Calendar.MINUTE, minute)
         }
-        val timeFormat = SimpleDateFormat("h:mm a", Locale.getDefault())
-        val formattedTime = timeFormat.format(calendar.time)
-        
-        // Set the alarm time in the UI
-        val timeTextView = findViewById<TextView>(R.id.timeTextView)
-        timeTextView.text = formattedTime
-        
-        // Set up dismiss button
-        val dismissButton = findViewById<Button>(R.id.dismissButton)
-        dismissButton.setOnClickListener {
-            dismissAlarm(hour, minute)
+        findViewById<TextView>(R.id.timeTextView).text =
+            SimpleDateFormat("h:mm", Locale.getDefault()).format(calendar.time)
+        findViewById<TextView>(R.id.ampmTextView).text =
+            SimpleDateFormat("a", Locale.getDefault()).format(calendar.time).uppercase()
+        findViewById<TextView>(R.id.dateTextView).text =
+            SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(Calendar.getInstance().time)
+
+        setupSwipeToDismiss(hour, minute)
+        quietServiceNotification()
+
+        if (RingtoneStore.isVideoMode(this)) {
+            startVideo()
+            if (AlarmService.getInstance() == null) startVibration()
+        } else {
+            startPulse()
+            // AlarmService already plays sound + vibration; only play here if it isn't running
+            // (otherwise the ringtone plays twice, slightly offset = echo).
+            if (AlarmService.getInstance() == null) {
+                startAlarmSound()
+                startVibration()
+            }
         }
-        
-        // Start alarm sound and vibration
-        startAlarmSound()
-        startVibration()
+    }
+
+    companion object {
+        /** Set true once the alarm video is actually playing (AlarmService checks this for its tone fallback). */
+        @Volatile var videoStarted = false
+    }
+
+    private var videoPlayer: MediaPlayer? = null
+
+    /** Fullscreen, center-cropped, looping video with its audio on the ALARM stream. */
+    private fun startVideo() {
+        val texture = findViewById<android.view.TextureView>(R.id.videoView)
+        texture.visibility = View.VISIBLE
+        findViewById<View>(R.id.scrimTop).visibility = View.VISIBLE
+        findViewById<View>(R.id.scrimBottom).visibility = View.VISIBLE
+        findViewById<View>(R.id.pulseRing1).visibility = View.GONE
+        findViewById<View>(R.id.pulseRing2).visibility = View.GONE
+
+        texture.surfaceTextureListener = object : android.view.TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(st: android.graphics.SurfaceTexture, w: Int, h: Int) {
+                try {
+                    videoPlayer = MediaPlayer().apply {
+                        setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_ALARM)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                                .build()
+                        )
+                        setDataSource(RingtoneStore.videoFile(this@AlarmActivity).absolutePath)
+                        setSurface(android.view.Surface(st))
+                        isLooping = true // loops until swiped off
+                        setOnVideoSizeChangedListener { _, vw, vh -> centerCrop(texture, vw, vh) }
+                        setOnPreparedListener {
+                            it.start()
+                            videoStarted = true
+                            AlarmService.getInstance()?.stopToneOnly() // in case fallback tone kicked in
+                        }
+                        setOnErrorListener { _, what, extra ->
+                            Log.e("AlarmActivity", "Video error $what/$extra, falling back to tone")
+                            videoFailed()
+                            true
+                        }
+                        prepareAsync()
+                    }
+                } catch (e: Exception) {
+                    Log.e("AlarmActivity", "Video start failed", e)
+                    videoFailed()
+                }
+            }
+            override fun onSurfaceTextureSizeChanged(st: android.graphics.SurfaceTexture, w: Int, h: Int) {
+                videoPlayer?.let { centerCrop(texture, it.videoWidth, it.videoHeight) }
+            }
+            override fun onSurfaceTextureDestroyed(st: android.graphics.SurfaceTexture) = true
+            override fun onSurfaceTextureUpdated(st: android.graphics.SurfaceTexture) {}
+        }
+    }
+
+    /** Scale video to fill the screen without stretching (crop the overflow). */
+    private fun centerCrop(view: android.view.TextureView, vw: Int, vh: Int) {
+        if (vw == 0 || vh == 0 || view.width == 0 || view.height == 0) return
+        val w = view.width.toFloat()
+        val h = view.height.toFloat()
+        val scale = maxOf(w / vw, h / vh)
+        val m = android.graphics.Matrix()
+        m.setScale(vw * scale / w, vh * scale / h, w / 2, h / 2)
+        view.setTransform(m)
+    }
+
+    /** Video unusable: back to the normal look + tone (service fallback handles audio if running). */
+    private fun videoFailed() {
+        try { videoPlayer?.release() } catch (_: Exception) {}
+        videoPlayer = null
+        findViewById<View>(R.id.videoView).visibility = View.GONE
+        findViewById<View>(R.id.scrimTop).visibility = View.GONE
+        findViewById<View>(R.id.scrimBottom).visibility = View.GONE
+        findViewById<View>(R.id.pulseRing1).visibility = View.VISIBLE
+        findViewById<View>(R.id.pulseRing2).visibility = View.VISIBLE
+        startPulse()
+        if (AlarmService.getInstance() == null) startAlarmSound()
     }
     
+    private val pulseAnimators = mutableListOf<android.animation.Animator>()
+
+    /** Two rings expanding + fading, offset by half a cycle. */
+    private fun startPulse() {
+        listOf(R.id.pulseRing1 to 0L, R.id.pulseRing2 to 1200L).forEach { (id, delay) ->
+            val ring = findViewById<View>(id)
+            ring.alpha = 0f
+            val anim = android.animation.AnimatorSet().apply {
+                playTogether(
+                    android.animation.ObjectAnimator.ofFloat(ring, View.SCALE_X, 0.85f, 1.5f).apply { repeatCount = android.animation.ValueAnimator.INFINITE },
+                    android.animation.ObjectAnimator.ofFloat(ring, View.SCALE_Y, 0.85f, 1.5f).apply { repeatCount = android.animation.ValueAnimator.INFINITE },
+                    android.animation.ObjectAnimator.ofFloat(ring, View.ALPHA, 0.7f, 0f).apply { repeatCount = android.animation.ValueAnimator.INFINITE }
+                )
+                duration = 2400
+                startDelay = delay
+                interpolator = android.view.animation.DecelerateInterpolator()
+            }
+            anim.start()
+            pulseAnimators.add(anim)
+        }
+    }
+
+    /** Drag pill upward; past threshold -> dismiss, else spring back. */
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private fun setupSwipeToDismiss(hour: Int, minute: Int) {
+        val pill = findViewById<View>(R.id.dismissPill)
+        val hint = findViewById<View>(R.id.swipeHint)
+        val threshold = 160 * resources.displayMetrics.density
+        var startY = 0f
+        var dismissed = false
+
+        pill.setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> { startY = e.rawY; true }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    val dy = (e.rawY - startY).coerceAtMost(0f)
+                    v.translationY = dy
+                    val p = (-dy / threshold).coerceIn(0f, 1f)
+                    v.alpha = 1f - 0.5f * p
+                    hint.alpha = 1f - p
+                    true
+                }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    if (!dismissed && -v.translationY >= threshold) {
+                        dismissed = true
+                        v.animate().translationY(-threshold * 2).alpha(0f).setDuration(150)
+                            .withEndAction { dismissAlarm(hour, minute) }.start()
+                    } else {
+                        v.animate().translationY(0f).alpha(1f).setDuration(200).start()
+                        hint.animate().alpha(1f).setDuration(200).start()
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    /** Replace the heads-up notification with a silent one so it doesn't cover the screen. */
+    private fun quietServiceNotification() {
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                nm.createNotificationChannel(
+                    android.app.NotificationChannel("alarm_ongoing", "Ringing alarm", android.app.NotificationManager.IMPORTANCE_LOW)
+                )
+            }
+            val n = androidx.core.app.NotificationCompat.Builder(this, "alarm_ongoing")
+                .setSmallIcon(R.mipmap.launcher_icon)
+                .setContentTitle("Alarm ringing")
+                .setOngoing(true)
+                .setSilent(true)
+                .build()
+            if (AlarmService.getInstance() != null) nm.notify(1, n)
+        } catch (e: Exception) {
+            Log.e("AlarmActivity", "quietServiceNotification failed", e)
+        }
+    }
+
     private fun startAlarmSound() {
         // Get the default alarm sound
-        val alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-        
-        mediaPlayer = MediaPlayer().apply {
+        val alarmSound = RingtoneStore.uriToPlay(this)
+        mediaPlayer = try { buildPlayer(alarmSound) } catch (e: Exception) {
+            Log.e("AlarmActivity", "Chosen ringtone failed, using default", e)
+            try { buildPlayer(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)) } catch (e2: Exception) { null }
+        }
+    }
+
+    private fun buildPlayer(alarmSound: android.net.Uri): MediaPlayer {
+        return MediaPlayer().apply {
             setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_ALARM)  // Use USAGE_ALARM for proper audio focus
@@ -223,15 +381,20 @@ class AlarmActivity : AppCompatActivity() {
     }
     
     private fun stopAlarm() {
-        mediaPlayer?.stop()
+        try { mediaPlayer?.stop() } catch (_: Exception) {}
         mediaPlayer?.release()
         mediaPlayer = null
-        
+
+        try { videoPlayer?.stop() } catch (_: Exception) {}
+        videoPlayer?.release()
+        videoPlayer = null
+
         vibrator?.cancel()
     }
     
     override fun onDestroy() {
         super.onDestroy()
+        pulseAnimators.forEach { it.cancel() }
         stopAlarm()
         if (wakeLock?.isHeld == true) {
             wakeLock?.release()

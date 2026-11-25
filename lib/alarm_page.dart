@@ -2,50 +2,142 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
+import 'dart:convert';
 import 'package:intl/intl.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'theme_provider.dart';
-import 'package:provider/provider.dart';
+import 'settings_page.dart';
+import 'wheel_time_picker.dart';
 
 class AlarmPage extends StatefulWidget {
-  const AlarmPage({Key? key}) : super(key: key);
+  const AlarmPage({super.key});
 
   @override
   _AlarmPageState createState() => _AlarmPageState();
 }
 
+/// One interval group as stored natively (AlarmStore). Every alarm has a unique id.
 class AlarmGroup {
-  final String title;
-  final String groupId;
-  final List<Map<String, dynamic>> alarms;
-  bool isExpanded;
+  final int id;
+  final int? fromHour, fromMinute, toHour, toMinute, interval;
+  final List<Map<String, dynamic>> alarms; // {id, hour, minute, formattedTime}
   bool isEnabled;
+  bool isExpanded;
 
   AlarmGroup({
-    required this.title,
-    required this.groupId,
+    required this.id,
+    this.fromHour,
+    this.fromMinute,
+    this.toHour,
+    this.toMinute,
+    this.interval,
     required this.alarms,
+    required this.isEnabled,
     this.isExpanded = false,
-    this.isEnabled = true,
   });
+
+  bool get isInterval => fromHour != null && toHour != null && interval != null;
+
+  /// True if the range wraps past midnight (e.g. 11 PM – 1 AM).
+  bool get crossesMidnight =>
+      isInterval && (toHour! * 60 + toMinute!) < (fromHour! * 60 + fromMinute!);
+
+  String get title {
+    if (!isInterval) return 'Individual alarms';
+    return '${_fmt(fromHour!, fromMinute!)} – ${_fmt(toHour!, toMinute!)}';
+  }
+
+  static String _fmt(int h, int m) =>
+      DateFormat('h:mm a').format(DateTime(2000, 1, 1, h, m));
+
+  factory AlarmGroup.fromJson(Map<String, dynamic> j) => AlarmGroup(
+        id: j['id'] as int,
+        fromHour: j['fromHour'] as int?,
+        fromMinute: j['fromMinute'] as int?,
+        toHour: j['toHour'] as int?,
+        toMinute: j['toMinute'] as int?,
+        interval: j['interval'] as int?,
+        isEnabled: j['enabled'] as bool? ?? true,
+        alarms: (j['alarms'] as List).map((a) {
+          final m = Map<String, dynamic>.from(a as Map);
+          m['formattedTime'] = _fmt(m['hour'] as int, m['minute'] as int);
+          return m;
+        }).toList(),
+      );
 }
 
-class _AlarmPageState extends State<AlarmPage> {
+class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
+  bool _lockScreenOk = true;
+
+  Future<void> _checkLockScreenPermission() async {
+    try {
+      final ok = await platform.invokeMethod<bool>('lockScreenPermissionOk') ?? true;
+      if (mounted && ok != _lockScreenOk) setState(() => _lockScreenOk = ok);
+    } catch (_) {}
+  }
+
+  // Re-check when user comes back from the MIUI permission screen.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _checkLockScreenPermission();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Widget _lockScreenBanner() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final amber = isDark ? const Color(0xFFFFCC80) : const Color(0xFF9A5B00);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      child: Material(
+        color: amber.withValues(alpha: isDark ? 0.12 : 0.10),
+        borderRadius: BorderRadius.circular(20),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
+          onTap: () => platform.invokeMethod('openLockScreenPermission'),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
+            child: Row(
+              children: [
+                Icon(Icons.lock_outline, color: amber),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Alarm can\'t show on lock screen',
+                          style: TextStyle(color: amber, fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Tap → allow "Show on Lock screen" and "Display pop-up windows while running in the background".',
+                        style: TextStyle(color: amber.withValues(alpha: 0.85), fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(Icons.chevron_right, color: amber),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   static const platform = MethodChannel('com.example.ak47clk/alarm');
 
   TimeOfDay _fromTime = TimeOfDay.now();
   TimeOfDay _toTime = TimeOfDay.now();
   int _intervalMinutes = 10;
-  List<Map<String, dynamic>> _alarms = [];
   List<AlarmGroup> _alarmGroups = [];
-
-  // Map to track which interval alarms belong to which group
-  Map<String, String> _alarmToGroupMap = {};
 
   @override
   void initState() {
     super.initState();
-    _loadAlarmGroupMappings();
+    WidgetsBinding.instance.addObserver(this);
+    _checkLockScreenPermission();
     _loadAlarms();
 
     // Initialize end time to be 1 hour after start time
@@ -53,750 +145,572 @@ class _AlarmPageState extends State<AlarmPage> {
     _fromTime = now;
     _toTime = TimeOfDay(hour: (now.hour + 1) % 24, minute: now.minute);
   }
-  
-  // Load alarm group mappings from SharedPreferences
-  Future<void> _loadAlarmGroupMappings() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final mappingsString = prefs.getString('alarm_group_mappings');
-      if (mappingsString != null && mappingsString.isNotEmpty) {
-        // Parse the string format: "hour:minute|groupId,hour:minute|groupId,..."
-        // Using | as separator between time and groupId to avoid conflicts with : in groupId
-        final Map<String, String> mappings = {};
-        final entries = mappingsString.split(',');
-        for (var entry in entries) {
-          final parts = entry.split('|');
-          if (parts.length == 2) {
-            final timeKey = parts[0]; // "hour:minute"
-            final groupId = parts[1]; // groupId
-            mappings[timeKey] = groupId;
-          }
-        }
-        _alarmToGroupMap = mappings;
-      }
-    } catch (e) {
-      print("Error loading alarm group mappings: $e");
-    }
-  }
-  
-  // Save alarm group mappings to SharedPreferences
-  Future<void> _saveAlarmGroupMappings() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      // Convert map to a simple string format: "hour:minute|groupId,hour:minute|groupId,..."
-      // Using | as separator to avoid conflicts with : in time format
-      final mappingsString = _alarmToGroupMap.entries
-          .map((e) => "${e.key}|${e.value}")
-          .join(',');
-      await prefs.setString('alarm_group_mappings', mappingsString);
-    } catch (e) {
-      print("Error saving alarm group mappings: $e");
-    }
-  }
-  
-  // Toggle alarm group on/off
-  Future<void> _toggleAlarmGroup(AlarmGroup group) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final newState = !group.isEnabled;
-      
-      setState(() {
-        group.isEnabled = newState;
-      });
-      
-      // Save the enabled state
-      await prefs.setBool('alarm_group_enabled_${group.groupId}', newState);
-      
-      // Save the updated groups (to persist the group structure)
-      await _saveAlarmGroups();
-      
-      if (newState) {
-        // Enable: Recreate all alarms in the group
-        for (var alarm in group.alarms) {
-          await platform.invokeMethod('setAlarm', {
-            'hour': alarm['hour'],
-            'minute': alarm['minute'],
-          });
-        }
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("${group.title} enabled")),
-        );
-      } else {
-        // Disable: Delete all alarms in the group (but keep them in memory)
-        for (var alarm in group.alarms) {
-          await platform.invokeMethod('deleteAlarm', {
-            'hour': alarm['hour'],
-            'minute': alarm['minute'],
-          });
-        }
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("${group.title} disabled")),
-        );
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Failed to toggle alarm group: $e")),
-      );
-      // Revert on error
-      setState(() {
-        group.isEnabled = !group.isEnabled;
-      });
-    }
-  }
 
-  // Format time to 12-hour format
-  String _formatTime(int hour, int minute) {
-    final now = DateTime.now();
-    final dateTime = DateTime(now.year, now.month, now.day, hour, minute);
-    return DateFormat('h:mm a').format(dateTime); // 12-hour format with am/pm
+  // ---------- data (all stored natively in AlarmStore) ----------
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   Future<void> _loadAlarms() async {
     try {
-      final List<dynamic> activeAlarms = await platform.invokeMethod('getAlarms');
-      
-      // Convert active alarms to our structured format
-      final activeAlarmsList =
-          activeAlarms
-              .map((alarm) {
-                final parts = alarm.toString().split(':');
-                if (parts.length == 2) {
-                  final hour = int.parse(parts[0]);
-                  final minute = int.parse(parts[1]);
-                  return {
-                    'rawTime': alarm,
-                    'formattedTime': _formatTime(hour, minute),
-                    'hour': hour,
-                    'minute': minute,
-                    'groupId':
-                        _alarmToGroupMap[alarm] ??
-                        'single', // Default to 'single' if not in a group
-                  };
-                }
-                return {
-                  'rawTime': alarm,
-                  'formattedTime': alarm,
-                  'groupId': 'single',
-                };
-              })
-              .toList()
-              .cast<Map<String, dynamic>>();
-
-      // Load stored alarm groups (includes disabled groups)
-      await _loadStoredAlarmGroups(activeAlarmsList);
-      
-      setState(() {});
-    } on PlatformException catch (e) {
-      print("Failed to load alarms: '${e.message}'.");
-    } on MissingPluginException catch (e) {
-      print("Method channel not implemented: ${e.message}");
-      setState(() {
-        _alarms = [];
-        _alarmGroups = [];
-      });
-    }
-  }
-  
-  // Load stored alarm groups from SharedPreferences
-  Future<void> _loadStoredAlarmGroups(List<Map<String, dynamic>> activeAlarms) async {
-    final prefs = await SharedPreferences.getInstance();
-    
-    // Get all stored group IDs
-    final storedGroupsJson = prefs.getString('stored_alarm_groups');
-    if (storedGroupsJson == null || storedGroupsJson.isEmpty) {
-      // No stored groups, organize from active alarms only
-      _alarms = activeAlarms;
-      await _organizeAlarmGroups();
-      // Save the organized groups for next time
-      await _saveAlarmGroups();
-      return;
-    }
-    
-    // Parse stored groups: "groupId|alarm1,alarm2,alarm3;groupId2|alarm1,alarm2;..."
-    final Map<String, List<Map<String, dynamic>>> storedGroups = {};
-    final groupStrings = storedGroupsJson.split(';');
-    
-    for (var groupString in groupStrings) {
-      if (groupString.isEmpty) continue;
-      final parts = groupString.split('|');
-      if (parts.length == 2) {
-        final groupId = parts[0];
-        final alarmsString = parts[1];
-        if (alarmsString.isNotEmpty) {
-          final alarmTimes = alarmsString.split(',');
-          final alarms = alarmTimes.map((time) {
-            final timeParts = time.split(':');
-            if (timeParts.length == 2) {
-              final hour = int.parse(timeParts[0]);
-              final minute = int.parse(timeParts[1]);
-              return {
-                'rawTime': time,
-                'formattedTime': _formatTime(hour, minute),
-                'hour': hour,
-                'minute': minute,
-                'groupId': groupId,
-              };
-            }
-            return null;
-          }).where((a) => a != null).cast<Map<String, dynamic>>().toList();
-          storedGroups[groupId] = alarms;
-        }
+      final raw = await platform.invokeMethod<String>('getGroups') ?? '[]';
+      final expanded = {for (final g in _alarmGroups) g.id: g.isExpanded};
+      final groups = (jsonDecode(raw) as List)
+          .map((j) => AlarmGroup.fromJson(Map<String, dynamic>.from(j as Map)))
+          .toList();
+      for (final g in groups) {
+        g.isExpanded = expanded[g.id] ?? false;
       }
-    }
-    
-    // Merge stored groups with active alarms
-    // Use stored groups as base, but mark which alarms are active
-    final allAlarms = <String, Map<String, dynamic>>{};
-    
-    // Add all stored alarms
-    for (var group in storedGroups.values) {
-      for (var alarm in group) {
-        allAlarms[alarm['rawTime']] = alarm;
-      }
-    }
-    
-    // Update with active alarm status
-    for (var activeAlarm in activeAlarms) {
-      allAlarms[activeAlarm['rawTime']] = activeAlarm;
-    }
-    
-    _alarms = allAlarms.values.toList();
-    await _organizeAlarmGroups();
-  }
-  
-  // Save alarm groups to SharedPreferences
-  Future<void> _saveAlarmGroups() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      
-      // Save groups in format: "groupId|alarm1,alarm2,alarm3;groupId2|alarm1,alarm2;..."
-      final List<String> groupStrings = [];
-      
-      for (var group in _alarmGroups) {
-        final alarmTimes = group.alarms
-            .map((a) => a['rawTime'].toString())
-            .join(',');
-        groupStrings.add("${group.groupId}|$alarmTimes");
-      }
-      
-      await prefs.setString('stored_alarm_groups', groupStrings.join(';'));
+      if (mounted) setState(() => _alarmGroups = groups);
     } catch (e) {
-      print("Error saving alarm groups: $e");
+      debugPrint('Failed to load alarms: $e');
     }
   }
 
-  // Organize alarms into their respective groups
-  Future<void> _organizeAlarmGroups() async {
-    // Create a list to store current expanded states and enabled states
-    Map<String, bool> expandedStates = {};
-    Map<String, bool> enabledStates = {};
-
-    // Save current states before rebuilding groups
-    for (var group in _alarmGroups) {
-      expandedStates[group.groupId] = group.isExpanded;
-      enabledStates[group.groupId] = group.isEnabled;
+  Future<void> _toggleAlarmGroup(AlarmGroup group) async {
+    final newState = !group.isEnabled;
+    setState(() => group.isEnabled = newState);
+    try {
+      await platform.invokeMethod('setGroupEnabled', {'groupId': group.id, 'enabled': newState});
+    } catch (e) {
+      setState(() => group.isEnabled = !newState); // revert
+      _toast('Failed to update alarm: $e');
     }
-    
-    // Load enabled states from SharedPreferences
-    final prefs = await SharedPreferences.getInstance();
-
-    // Reset the groups
-    _alarmGroups = [];
-
-    // Group alarms by their groupId
-    Map<String, List<Map<String, dynamic>>> groupedAlarms = {};
-    Map<String, Map<String, dynamic>> groupInfo = {};
-
-    // Process all alarms
-    for (var alarm in _alarms) {
-      final groupId = alarm['groupId'] ?? 'single';
-
-      // Initialize group if first time seeing it
-      if (!groupedAlarms.containsKey(groupId)) {
-        groupedAlarms[groupId] = [];
-      }
-
-      // Add alarm to its group
-      groupedAlarms[groupId]?.add(alarm);
-
-      // Extract group metadata if it's not a single alarm
-      if (groupId != 'single') {
-        try {
-          // Try to parse the group ID to extract metadata
-          final parts = groupId.split('-');
-          if (parts.length == 3) {
-            final fromTimeParts = parts[0].split(':');
-            final toTimeParts = parts[1].split(':');
-            final interval = parts[2];
-
-            final fromHour = int.parse(fromTimeParts[0]);
-            final fromMinute = int.parse(fromTimeParts[1]);
-            final toHour = int.parse(toTimeParts[0]);
-            final toMinute = int.parse(toTimeParts[1]);
-
-            final fromFormatted = _formatTime(fromHour, fromMinute);
-            final toFormatted = _formatTime(toHour, toMinute);
-
-            groupInfo[groupId] = {
-              'title': "$fromFormatted to $toFormatted", // Simplified title
-              'fromTime': fromFormatted,
-              'toTime': toFormatted,
-              'interval': interval,
-            };
-          }
-        } catch (e) {
-          print("Error parsing group ID: $e");
-        }
-      }
-    }
-
-    // Create single alarm group if any exist
-    if (groupedAlarms.containsKey('single')) {
-      final groupId = 'single';
-      final title = "Individual Alarms";
-      _alarmGroups.add(
-        AlarmGroup(
-          title: title,
-          groupId: groupId,
-          alarms: groupedAlarms['single'] ?? [],
-          isExpanded: expandedStates[groupId] ?? true,
-          isEnabled: prefs.getBool('alarm_group_enabled_$groupId') ?? true,
-        ),
-      );
-    }
-
-    // Add all interval alarm groups
-    groupedAlarms.forEach((groupId, alarms) {
-      if (groupId != 'single' && alarms.isNotEmpty) {
-        final info = groupInfo[groupId];
-        final title = info?['title'] ?? "Interval Alarms";
-        final isEnabled = prefs.getBool('alarm_group_enabled_$groupId') ?? true;
-
-        _alarmGroups.add(
-          AlarmGroup(
-            title: title,
-            groupId: groupId,
-            alarms: alarms,
-            isExpanded: expandedStates[groupId] ?? false,
-            isEnabled: isEnabled,
-          ),
-        );
-        
-        // If group is disabled, make sure alarms are deleted from AlarmManager
-        if (!isEnabled) {
-          // Delete alarms in disabled groups (they might have been restored on boot)
-          for (var alarm in alarms) {
-            platform.invokeMethod('deleteAlarm', {
-              'hour': alarm['hour'],
-              'minute': alarm['minute'],
-            }).catchError((e) {
-              print("Error deleting disabled alarm: $e");
-            });
-          }
-        }
-      }
-    });
-    
-    // Also check individual alarms group
-    if (groupedAlarms.containsKey('single')) {
-      final isEnabled = prefs.getBool('alarm_group_enabled_single') ?? true;
-      if (!isEnabled) {
-        // Delete individual alarms if group is disabled
-        for (var alarm in groupedAlarms['single'] ?? []) {
-          platform.invokeMethod('deleteAlarm', {
-            'hour': alarm['hour'],
-            'minute': alarm['minute'],
-          }).catchError((e) {
-            print("Error deleting disabled alarm: $e");
-          });
-        }
-      }
-    }
-    
-    // Save the organized groups
-    await _saveAlarmGroups();
   }
 
-  // Delete all alarms in a group
   Future<void> _deleteAlarmGroup(AlarmGroup group) async {
+    setState(() => _alarmGroups.removeWhere((g) => g.id == group.id));
     try {
-      for (var alarm in group.alarms) {
-        await platform.invokeMethod('deleteAlarm', {
-          'hour': alarm['hour'],
-          'minute': alarm['minute'],
-        });
-
-        // Remove from tracking map
-        _alarmToGroupMap.remove(alarm['rawTime']);
-      }
-      
-      // Save the updated group mappings
-      await _saveAlarmGroupMappings();
-      
-      // Remove group from stored groups
-      _alarmGroups.removeWhere((g) => g.groupId == group.groupId);
-      await _saveAlarmGroups();
-
-      // Update UI
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("${group.alarms.length} alarms deleted")),
-      );
-
-      setState(() {});
+      await platform.invokeMethod('deleteGroup', {'groupId': group.id});
+      _toast('${group.alarms.length} alarms deleted');
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Failed to delete alarm group: $e")),
-      );
+      _toast('Failed to delete: $e');
     }
+    await _loadAlarms();
   }
 
   Future<void> _deleteAlarm(Map<String, dynamic> alarm) async {
     try {
-      await platform.invokeMethod('deleteAlarm', {
-        'hour': alarm['hour'],
-        'minute': alarm['minute'],
-      });
-      
-      // Remove from tracking map
-      _alarmToGroupMap.remove(alarm['rawTime']);
-      await _saveAlarmGroupMappings();
-      
-      // Remove from stored groups and save
-      for (var group in _alarmGroups) {
-        group.alarms.removeWhere((a) => a['rawTime'] == alarm['rawTime']);
-      }
-      _alarmGroups.removeWhere((group) => group.alarms.isEmpty);
-      await _saveAlarmGroups();
-      
-      _loadAlarms();
-    } on PlatformException catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Failed to delete alarm: '${e.message}'")),
-      );
-    } on MissingPluginException catch (e) {
-      print("Method channel not implemented: ${e.message}");
+      await platform.invokeMethod('deleteAlarm', {'alarmId': alarm['id']});
+    } catch (e) {
+      _toast('Failed to delete alarm: $e');
     }
+    await _loadAlarms();
   }
 
   Future<void> _setIntervalAlarms() async {
     try {
-      final fromFormatted = _formatTime(_fromTime.hour, _fromTime.minute);
-      final toFormatted = _formatTime(_toTime.hour, _toTime.minute);
-
-      // Create a unique group ID for this interval set
-      final groupId =
-          "${_fromTime.hour}:${_fromTime.minute}-${_toTime.hour}:${_toTime.minute}-$_intervalMinutes";
-      final groupTitle =
-          "From $fromFormatted to $toFormatted (every $_intervalMinutes min)";
-
-      await platform.invokeMethod('setIntervalAlarms', {
+      final count = await platform.invokeMethod<int>('createGroup', {
         'fromHour': _fromTime.hour,
         'fromMinute': _fromTime.minute,
         'toHour': _toTime.hour,
         'toMinute': _toTime.minute,
-        'intervalMinutes': _intervalMinutes,
+        'interval': _intervalMinutes,
       });
-
-      // Calculate what times should be in this group (for tracking)
-      List<String> expectedAlarms = [];
-      int startMinutes = (_fromTime.hour * 60) + _fromTime.minute;
-      int endMinutes = (_toTime.hour * 60) + _toTime.minute;
-
-      for (
-        int currentMinutes = startMinutes;
-        currentMinutes <= endMinutes;
-        currentMinutes += _intervalMinutes
-      ) {
-        int hour = currentMinutes ~/ 60;
-        int minute = currentMinutes % 60;
-        expectedAlarms.add("$hour:$minute");
-
-        // Map this alarm to the group
-        _alarmToGroupMap["$hour:$minute"] = groupId;
-      }
-      
-      // Save the group mappings
-      await _saveAlarmGroupMappings();
-      
-      // Refresh alarms list to update groups
       await _loadAlarms();
-      
-      // Save the updated groups
-      await _saveAlarmGroups();
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Interval alarms set from $fromFormatted to $toFormatted every $_intervalMinutes minutes',
-          ),
-        ),
-      );
-    } on PlatformException catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text("Failed to set interval alarms: '${e.message}'"),
-        ),
-      );
-    } on MissingPluginException catch (e) {
-      print("Method channel not implemented: ${e.message}");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            "Setting interval alarms - please check your device alarms",
-          ),
-        ),
-      );
+      _toast('$count alarms set, every $_intervalMinutes min');
+    } catch (e) {
+      _toast('Failed to set alarms: $e');
     }
   }
 
-  Future<void> _selectFromTime(BuildContext context) async {
-    final TimeOfDay? picked = await showTimePicker(
-      context: context,
-      initialTime: _fromTime,
-    );
-    if (picked != null && picked != _fromTime) {
-      setState(() {
-        _fromTime = picked;
-      });
+  // ---------- UI ----------
+
+  /// Next upcoming alarm time across enabled groups (today or tomorrow).
+  DateTime? _nextAlarm() {
+    final now = DateTime.now();
+    DateTime? best;
+    for (final g in _alarmGroups.where((g) => g.isEnabled)) {
+      for (final a in g.alarms) {
+        final h = a['hour'], m = a['minute'];
+        if (h is! int || m is! int) continue;
+        var t = DateTime(now.year, now.month, now.day, h, m);
+        if (!t.isAfter(now)) t = t.add(const Duration(days: 1));
+        if (best == null || t.isBefore(best)) best = t;
+      }
     }
+    return best;
   }
 
-  Future<void> _selectToTime(BuildContext context) async {
-    final TimeOfDay? picked = await showTimePicker(
-      context: context,
-      initialTime: _toTime,
-    );
-    if (picked != null && picked != _toTime) {
-      setState(() {
-        _toTime = picked;
-      });
-    }
+  String _countdownText() {
+    final next = _nextAlarm();
+    if (next == null) return 'No upcoming alarms';
+    final d = next.difference(DateTime.now());
+    final h = d.inHours, m = d.inMinutes % 60;
+    if (h == 0) return 'Next alarm in ${m == 0 ? 1 : m} min';
+    return 'Next alarm in ${h}h ${m}m';
   }
+
+  Color _accent(BuildContext context) =>
+      Theme.of(context).brightness == Brightness.dark
+          ? const Color(0xFF8AB4F8)
+          : const Color(0xFF3B6FD8);
 
   @override
   Widget build(BuildContext context) {
-    // Format times for display
-    final formattedFromTime = _formatTime(_fromTime.hour, _fromTime.minute);
-    final formattedToTime = _formatTime(_toTime.hour, _toTime.minute);
-    final themeProvider = Provider.of<ThemeProvider>(context);
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final dim = isDark ? Colors.white54 : Colors.black54;
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('ak47clk'),
-        actions: [
-          IconButton(
-            icon: Icon(
-              themeProvider.isDarkMode ? Icons.light_mode : Icons.dark_mode,
-            ),
-            onPressed: () {
-              themeProvider.toggleTheme(!themeProvider.isDarkMode);
-            },
-            tooltip: themeProvider.isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode',
-          ),
-        ],
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
+      body: SafeArea(
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Card(
-              elevation: 4.0,
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  children: [
-                    const SizedBox(height: 20),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Column(
-                            children: [
-                              const Text('From'),
-                              const SizedBox(height: 8),
-                              Text(
-                                formattedFromTime,
-                                style: const TextStyle(
-                                  fontSize: 18.0,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              ElevatedButton(
-                                onPressed: () => _selectFromTime(context),
-                                child: const Text('Select Start'),
-                              ),
-                            ],
-                          ),
-                        ),
-                        Expanded(
-                          child: Column(
-                            children: [
-                              const Text('To'),
-                              const SizedBox(height: 8),
-                              Text(
-                                formattedToTime,
-                                style: const TextStyle(
-                                  fontSize: 18.0,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              ElevatedButton(
-                                onPressed: () => _selectToTime(context),
-                                child: const Text('Select End'),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 12, 8, 0),
+              child: Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Alarms',
+                      style: TextStyle(fontSize: 34, fontWeight: FontWeight.w400),
                     ),
-                    const SizedBox(height: 20),
-                    Column(
-                      children: [
-                        const Text('Interval (minutes)'),
-                        const SizedBox(height: 8),
-                        DropdownButton<int>(
-                          value: _intervalMinutes,
-                          items:
-                              [2, 5, 8, 10].map((int value) {
-                                return DropdownMenuItem<int>(
-                                  value: value,
-                                  child: Text('$value minutes'),
-                                );
-                              }).toList(),
-                          onChanged: (int? newValue) {
-                            if (newValue != null) {
-                              setState(() {
-                                _intervalMinutes = newValue;
-                              });
-                            }
-                          },
-                        ),
-                      ],
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.settings_outlined),
+                    tooltip: 'Settings',
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const SettingsPage()),
                     ),
-                    const SizedBox(height: 20),
-                    ElevatedButton(
-                      onPressed: _setIntervalAlarms,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Theme.of(context).primaryColor,
-                        foregroundColor: Colors.white,
-                      ),
-                      child: const Text('Set Interval Alarms'),
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 20),
-            _buildAlarmsList(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 4, 24, 16),
+              child: Text(_countdownText(), style: TextStyle(color: dim, fontSize: 15)),
+            ),
+            if (!_lockScreenOk) _lockScreenBanner(),
+            Expanded(child: _buildAlarmsList()),
           ],
+        ),
+      ),
+      // RepaintBoundary: the breathing glow repaints only the button, not the whole page.
+      floatingActionButton: RepaintBoundary(
+        child: _BubbleFab(
+          color: _accent(context),
+          onTap: _openAddBubble,
         ),
       ),
     );
   }
 
   Widget _buildAlarmsList() {
-    return Expanded(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Current Alarms',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 10),
-          Expanded(
-            child:
-                _alarmGroups.isEmpty
-                    ? const Center(child: Text('No alarms set'))
-                    : ListView.builder(
-                      itemCount: _alarmGroups.length,
-                      itemBuilder: (context, groupIndex) {
-                        final group = _alarmGroups[groupIndex];
-                        return Card(
-                          margin: EdgeInsets.only(bottom: 8),
-                          child: Column(
-                            children: [
-                              // Group header
-                              ListTile(
-                                title: Text(
-                                  group.title,
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    color: group.isEnabled ? null : Colors.grey,
-                                  ),
-                                ),
-                                trailing: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    // On/Off Switch
-                                    Switch(
-                                      value: group.isEnabled,
-                                      onChanged: (value) => _toggleAlarmGroup(group),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    // Delete button (red)
-                                    IconButton(
-                                      icon: Icon(
-                                        Icons.delete,
-                                        color: Colors.red,
-                                      ),
-                                      onPressed: () => _deleteAlarmGroup(group),
-                                    ),
-                                    // Expand/collapse button
-                                    IconButton(
-                                      icon: Icon(
-                                        group.isExpanded
-                                            ? Icons.expand_less
-                                            : Icons.expand_more,
-                                      ),
-                                      onPressed: () {
-                                        setState(() {
-                                          group.isExpanded = !group.isExpanded;
-                                        });
-                                      },
-                                    ),
-                                  ],
-                                ),
-                                onTap: () {
-                                  setState(() {
-                                    group.isExpanded = !group.isExpanded;
-                                  });
-                                },
-                              ),
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final dim = isDark ? Colors.white38 : Colors.black38;
 
-                              // Expandable alarm list
-                              if (group.isExpanded)
-                                ListView.builder(
-                                  shrinkWrap: true,
-                                  physics: NeverScrollableScrollPhysics(),
-                                  itemCount: group.alarms.length,
-                                  itemBuilder: (context, alarmIndex) {
-                                    final alarm = group.alarms[alarmIndex];
-                                    return ListTile(
-                                      contentPadding: EdgeInsets.only(
-                                        left: 32,
-                                        right: 16,
-                                      ),
-                                      title: Text(
-                                        alarm['formattedTime'],
-                                        style: TextStyle(fontSize: 14),
-                                      ),
-                                      trailing: IconButton(
-                                        icon: Icon(Icons.delete, size: 20),
-                                        onPressed: () => _deleteAlarm(alarm),
-                                      ),
-                                    );
-                                  },
-                                ),
-                            ],
-                          ),
-                        );
-                      },
-                    ),
+    if (_alarmGroups.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.alarm_off_outlined, size: 56, color: dim),
+            const SizedBox(height: 12),
+            Text('No alarms yet', style: TextStyle(color: dim, fontSize: 16)),
+            const SizedBox(height: 4),
+            Text('Tap + to add one', style: TextStyle(color: dim, fontSize: 13)),
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 100),
+      itemCount: _alarmGroups.length,
+      itemBuilder: (context, i) => _groupCard(_alarmGroups[i]),
+    );
+  }
+
+  Widget _groupCard(AlarmGroup group) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final cardColor = isDark ? const Color(0xFF1E1F23) : const Color(0xFFF3F4F7);
+    final fg = isDark ? Colors.white : Colors.black87;
+    final dim = isDark ? Colors.white54 : Colors.black54;
+    final on = group.isEnabled;
+
+    // Subtitle: "every 10 min · 7 alarms" for interval groups
+    String subtitle = '${group.alarms.length} alarm${group.alarms.length == 1 ? '' : 's'}';
+    if (group.isInterval) {
+      subtitle = 'every ${group.interval} min · $subtitle';
+      if (group.crossesMidnight) subtitle += ' · overnight';
+    }
+
+    return Dismissible(
+      key: ValueKey(group.id),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.only(right: 24),
+        alignment: Alignment.centerRight,
+        decoration: BoxDecoration(
+          color: const Color(0xFFD9534F),
+          borderRadius: BorderRadius.circular(24),
+        ),
+        child: const Icon(Icons.delete_outline, color: Colors.white),
+      ),
+      confirmDismiss: (_) async => await showDialog<bool>(
+            context: context,
+            builder: (c) => AlertDialog(
+              title: const Text('Delete alarms?'),
+              content: Text(group.title),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
+                TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('Delete')),
+              ],
+            ),
+          ) ??
+          false,
+      onDismissed: (_) => _deleteAlarmGroup(group),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        decoration: BoxDecoration(
+          color: cardColor,
+          borderRadius: BorderRadius.circular(24),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(24),
+            onTap: () => setState(() => group.isExpanded = !group.isExpanded),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 18, 12, 18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              group.title,
+                              style: TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w300,
+                                color: on ? fg : dim,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(subtitle, style: TextStyle(color: dim, fontSize: 13)),
+                          ],
+                        ),
+                      ),
+                      Switch(
+                        value: on,
+                        onChanged: (_) => _toggleAlarmGroup(group),
+                      ),
+                    ],
+                  ),
+                  AnimatedSize(
+                    duration: const Duration(milliseconds: 200),
+                    curve: Curves.easeOut,
+                    child: group.isExpanded
+                        ? Padding(
+                            padding: const EdgeInsets.only(top: 14, right: 8),
+                            child: Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: group.alarms
+                                  .map((a) => _alarmChip(a, isDark, dim))
+                                  .toList(),
+                            ),
+                          )
+                        : const SizedBox(width: double.infinity),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _alarmChip(Map<String, dynamic> alarm, bool isDark, Color dim) {
+    return Container(
+      padding: const EdgeInsets.only(left: 12, right: 4),
+      decoration: BoxDecoration(
+        color: isDark ? Colors.white10 : Colors.black.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(alarm['formattedTime'].toString(), style: const TextStyle(fontSize: 13)),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            iconSize: 16,
+            icon: Icon(Icons.close, color: dim),
+            onPressed: () => _deleteAlarm(alarm),
           ),
         ],
+      ),
+    );
+  }
+
+  /// Opens the "liquid bubble" add card: grows out of the + button with an elastic pop.
+  Future<void> _openAddBubble() async {
+    final saved = await showGeneralDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Close',
+      barrierColor: Colors.black.withValues(alpha: 0.45),
+      transitionDuration: const Duration(milliseconds: 320),
+      // Card built once here (not every animation frame) and cached in its own layer.
+      pageBuilder: (ctx, _, __) => Align(
+        alignment: Alignment.bottomCenter,
+        child: RepaintBoundary(child: _addBubbleCard(ctx)),
+      ),
+      transitionBuilder: (ctx, anim, _, child) {
+        final curved = CurvedAnimation(
+          parent: anim,
+          curve: Curves.easeOutBack,
+          reverseCurve: Curves.easeInCubic,
+        );
+        return ScaleTransition(
+          scale: curved,
+          alignment: Alignment.bottomRight,
+          child: FadeTransition(opacity: anim, child: child),
+        );
+      },
+    );
+    if (saved == true) await _setIntervalAlarms();
+  }
+
+  Widget _addBubbleCard(BuildContext ctx) {
+    final isDark = Theme.of(ctx).brightness == Brightness.dark;
+    final fg = isDark ? Colors.white : Colors.black87;
+    final dim = isDark ? Colors.white54 : Colors.black54;
+    final accent = _accent(ctx);
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(36),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: isDark ? 0.5 : 0.12),
+                blurRadius: 32,
+                offset: const Offset(0, 12),
+              ),
+            ],
+          ),
+          child: ClipRRect(
+          borderRadius: BorderRadius.circular(36),
+          child: SizedBox(
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 20),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(36),
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: isDark
+                      ? [const Color(0xFF2A2D35), const Color(0xFF1A1C21)]
+                      : [const Color(0xFFFFFFFF), const Color(0xFFF1F3F8)],
+                ),
+                border: Border.all(
+                  color: isDark ? Colors.white12 : Colors.white,
+                  width: 1,
+                ),
+              ),
+              child: Material(
+                color: Colors.transparent,
+                child: StatefulBuilder(
+                  builder: (ctx, setLocal) {
+                    Future<void> pick(bool isFrom) async {
+                      final picked = await showWheelTimePicker(
+                        ctx,
+                        initialTime: isFrom ? _fromTime : _toTime,
+                        title: isFrom ? 'Start time' : 'End time',
+                      );
+                      if (picked != null) {
+                        setLocal(() => isFrom ? _fromTime = picked : _toTime = picked);
+                        setState(() {});
+                      }
+                    }
+
+                    return Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('New interval alarm',
+                            style: TextStyle(color: dim, fontSize: 14)),
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            Expanded(child: _timeTile('From', _fromTime, () => pick(true), fg, dim)),
+                            Icon(Icons.arrow_forward, color: dim, size: 20),
+                            Expanded(child: _timeTile('To', _toTime, () => pick(false), fg, dim)),
+                          ],
+                        ),
+                        const SizedBox(height: 20),
+                        Text('Repeat every', style: TextStyle(color: dim, fontSize: 14)),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [2, 5, 8, 10].map((v) {
+                            final sel = v == _intervalMinutes;
+                            return Padding(
+                              padding: const EdgeInsets.only(right: 8),
+                              child: ChoiceChip(
+                                label: Text('$v min'),
+                                selected: sel,
+                                showCheckmark: false,
+                                shape: const StadiumBorder(),
+                                selectedColor: accent.withValues(alpha: 0.25),
+                                side: BorderSide(color: sel ? accent : (isDark ? Colors.white24 : Colors.black12)),
+                                onSelected: (_) {
+                                  setLocal(() => _intervalMinutes = v);
+                                  setState(() {});
+                                },
+                              ),
+                            );
+                          }).toList(),
+                        ),
+                        const SizedBox(height: 24),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _pill('Cancel', isDark ? Colors.white10 : Colors.black.withValues(alpha: 0.06), fg,
+                                  () => Navigator.pop(ctx, false)),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: _pill('Set alarms', accent, isDark ? Colors.black : Colors.white,
+                                  () => Navigator.pop(ctx, true)),
+                            ),
+                          ],
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        ),
+        ),
+      ),
+    );
+  }
+
+  Widget _timeTile(String label, TimeOfDay t, VoidCallback onTap, Color fg, Color dim) {
+    final h = t.hourOfPeriod == 0 ? 12 : t.hourOfPeriod;
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Column(
+          children: [
+            Text(label, style: TextStyle(color: dim, fontSize: 13)),
+            const SizedBox(height: 4),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                Text('$h:${t.minute.toString().padLeft(2, '0')}',
+                    style: TextStyle(fontSize: 34, fontWeight: FontWeight.w300, color: fg)),
+                const SizedBox(width: 4),
+                Text(t.period == DayPeriod.am ? 'AM' : 'PM',
+                    style: TextStyle(fontSize: 13, color: dim)),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _pill(String text, Color bg, Color fg, VoidCallback onTap) {
+    return Material(
+      color: bg,
+      borderRadius: BorderRadius.circular(32),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(32),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          child: Center(
+            child: Text(text, style: TextStyle(color: fg, fontSize: 16, fontWeight: FontWeight.w500)),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Round + button with a soft "breathing" glow and a squishy press.
+class _BubbleFab extends StatefulWidget {
+  final Color color;
+  final VoidCallback onTap;
+  const _BubbleFab({required this.color, required this.onTap});
+
+  @override
+  State<_BubbleFab> createState() => _BubbleFabState();
+}
+
+class _BubbleFabState extends State<_BubbleFab> with SingleTickerProviderStateMixin {
+  late final AnimationController _breath =
+      AnimationController(vsync: this, duration: const Duration(seconds: 3))..repeat(reverse: true);
+  bool _pressed = false;
+
+  @override
+  void dispose() {
+    _breath.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapCancel: () => setState(() => _pressed = false),
+      onTapUp: (_) {
+        setState(() => _pressed = false);
+        widget.onTap();
+      },
+      child: AnimatedScale(
+        scale: _pressed ? 0.88 : 1.0,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutBack,
+        child: AnimatedBuilder(
+          animation: _breath,
+          builder: (_, child) => Container(
+            width: 64,
+            height: 64,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: RadialGradient(
+                center: const Alignment(-0.3, -0.4),
+                colors: [Color.lerp(widget.color, Colors.white, 0.35)!, widget.color],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: widget.color.withValues(alpha: 0.25 + 0.2 * _breath.value),
+                  blurRadius: 18 + 10 * _breath.value,
+                  spreadRadius: 1,
+                ),
+              ],
+            ),
+            child: child,
+          ),
+          child: Icon(
+            Icons.add,
+            size: 30,
+            color: Theme.of(context).brightness == Brightness.dark
+                ? const Color(0xFF0E0F12)
+                : Colors.white,
+          ),
+        ),
       ),
     );
   }

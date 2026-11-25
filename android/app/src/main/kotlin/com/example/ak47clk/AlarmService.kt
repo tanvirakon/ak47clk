@@ -24,6 +24,8 @@ import androidx.core.app.NotificationCompat
 
 class AlarmService : Service() {
     companion object {
+        const val ALARM_CHANNEL_ID = "alarm_fullscreen_v2"
+
         @Volatile
         private var instance: AlarmService? = null
         
@@ -95,30 +97,38 @@ class AlarmService : Service() {
         requestAudioFocus()
         
         // Start playing alarm sound immediately
-        startAlarmSound()
         startVibration()
+        if (RingtoneStore.isVideoMode(this)) {
+            // AlarmActivity plays the video + its audio. Safety net: if the video hasn't
+            // started in 4s (activity blocked / bad file), ring the tone so the alarm is never silent.
+            AlarmActivity.videoStarted = false
+            handler.postDelayed({
+                if (!isStopped && !AlarmActivity.videoStarted) {
+                    Log.w("AlarmService", "Video didn't start, falling back to tone")
+                    startAlarmSound()
+                }
+            }, 4000)
+        } else {
+            startAlarmSound()
+        }
         
         // Create notification
         val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // Old channel played the system default sound on top of our ringtone. Channels are
+            // immutable once created, so use a new silent one; MediaPlayer handles all audio.
+            notificationManager.deleteNotificationChannel("flutter_alarm_channel")
             val channel = NotificationChannel(
-                "flutter_alarm_channel",
-                "Flutter Alarm Clock",
-                NotificationManager.IMPORTANCE_MAX
+                ALARM_CHANNEL_ID,
+                "Alarms",
+                NotificationManager.IMPORTANCE_HIGH
             ).apply {
-                description = "Alarms from Flutter Alarm Clock app"
-                enableLights(true)
-                enableVibration(true)
+                description = "Ringing alarms"
+                enableVibration(false)
+                setSound(null, null)
                 setBypassDnd(true)
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-                
-                val alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-                val audioAttributes = AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
-                setSound(alarmSound, audioAttributes)
             }
             notificationManager.createNotificationChannel(channel)
         }
@@ -146,7 +156,7 @@ class AlarmService : Service() {
         )
         
         // Build notification
-        val notification = NotificationCompat.Builder(this, "flutter_alarm_channel")
+        val notification = NotificationCompat.Builder(this, ALARM_CHANNEL_ID)
             .setSmallIcon(R.mipmap.launcher_icon)
             .setContentTitle("Alarm")
             .setContentText("Alarm set for ${formatTime(hour, minute)}")
@@ -155,8 +165,7 @@ class AlarmService : Service() {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setFullScreenIntent(pendingIntent, true)
             .setAutoCancel(true)
-            .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM))
-            .setVibrate(longArrayOf(0, 500, 500, 500))
+            .setSilent(true)
             .build()
         
         // Start foreground service with notification
@@ -228,10 +237,17 @@ class AlarmService : Service() {
         }
     }
     
+    /** Stop service-side tone (used when the video kicks in late, after the fallback tone started). */
+    fun stopToneOnly() {
+        try { mediaPlayer?.stop(); mediaPlayer?.release() } catch (_: Exception) {}
+        mediaPlayer = null
+    }
+
     private fun startAlarmSound() {
+        if (mediaPlayer != null) return
         try {
-            val alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-            
+            val alarmSound = RingtoneStore.uriToPlay(this)
+
             mediaPlayer = MediaPlayer().apply {
                 setAudioAttributes(
                     AudioAttributes.Builder()
@@ -249,6 +265,24 @@ class AlarmService : Service() {
             Log.d("AlarmService", "Alarm sound started")
         } catch (e: Exception) {
             Log.e("AlarmService", "Failed to start alarm sound: ${e.message}", e)
+            // Fallback to system default alarm if chosen ringtone fails
+            try {
+                mediaPlayer?.release()
+                mediaPlayer = MediaPlayer().apply {
+                    setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ALARM)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+                    )
+                    setDataSource(applicationContext, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM))
+                    isLooping = true
+                    prepare()
+                    start()
+                }
+            } catch (e2: Exception) {
+                Log.e("AlarmService", "Default alarm sound failed too", e2)
+            }
         }
     }
     

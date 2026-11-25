@@ -6,18 +6,21 @@ import android.content.Intent
 import android.util.Log
 
 /**
- * Receiver to restore alarms when device restarts
+ * AlarmManager forgets everything on reboot, app update, or clock/timezone change.
+ * Reschedule straight from AlarmStore - no need to open the app (Android blocks that anyway).
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-            Log.d("BootReceiver", "Boot completed, restoring alarms")
-            
-            // Start MainActivity to restore alarms
-            val launchIntent = Intent(context, MainActivity::class.java)
-            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            launchIntent.putExtra("RESTORE_ALARMS", true)
-            context.startActivity(launchIntent)
-        }
+        Log.d("BootReceiver", "Rescheduling alarms after ${intent.action}")
+        val pending = goAsync()
+        Thread {
+            try {
+                AlarmScheduler.rescheduleAll(context.applicationContext)
+            } catch (e: Exception) {
+                Log.e("BootReceiver", "Reschedule failed", e)
+            } finally {
+                pending.finish()
+            }
+        }.start()
     }
 }
