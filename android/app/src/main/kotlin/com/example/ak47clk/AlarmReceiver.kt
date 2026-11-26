@@ -32,7 +32,11 @@ class AlarmReceiver : BroadcastReceiver() {
         val alarmId = intent.getIntExtra(AlarmScheduler.EXTRA_ID, -1)
 
         // A single (one-time) alarm switches itself off once it rings.
-        if (alarmId != -1) {
+        if (alarmId == AlarmScheduler.TIMER_ID) {
+            try { TimerStore.onRang(context) } catch (e: Exception) {
+                Log.e("AlarmReceiver", "Timer onRang failed", e)
+            }
+        } else if (alarmId != -1) {
             try { AlarmStore.onFired(context, alarmId) } catch (e: Exception) {
                 Log.e("AlarmReceiver", "onFired failed", e)
             }

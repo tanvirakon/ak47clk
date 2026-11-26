@@ -147,7 +147,7 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
 
   TimeOfDay _fromTime = TimeOfDay.now();
   TimeOfDay _toTime = TimeOfDay.now();
-  int _intervalMinutes = 10;
+  int _intervalMinutes = 2;
   List<AlarmGroup> _alarmGroups = [];
 
   // Single (one-time) alarm draft

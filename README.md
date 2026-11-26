@@ -1,174 +1,112 @@
-<!-- filepath: e:\code i write\ak47clk\README.md -->
-
 # AK47 Alarm Clock
 
-A customizable interval alarm clock app built with Flutter that allows you to set multiple alarms at regular intervals. Alarms ring reliably even when your phone is locked, in sleep mode, or when using other apps.
+A clean, reliable clock app for Android built with Flutter + native Kotlin. Alarms, interval alarms, timer and stopwatch — all ring on the lock screen, survive reboots, and work with the app closed.
 
 ## Features
 
-- **Interval Alarms**: Set a series of alarms between two time points at regular intervals
-- **Flexible Intervals**: Choose from 2, 5, 8, or 10 minute intervals
-- **Organized Interface**: Alarms are grouped by time range for easy management
-- **Batch Delete**: Delete an entire group of interval alarms with one tap
-- **Individual Control**: Expand alarm groups to manage individual alarms
-- **Persistent Storage**: Alarms are saved and automatically restored when you restart the app
-- **Reliable Notifications**: Full-screen alarm alerts that work even when:
-  - Your device is locked
-  - Phone is in sleep/Doze mode
-  - You're using other apps (browsing, watching movies, etc.)
-  - Alarms are set for extended periods (6+ hours ahead)
-- **Redundant Scheduling**: Dual alarm system ensures alarms never get missed
-- **Normal Volume Control**: Alarms ring at your system alarm volume level
-- **Dark/Light Theme**: Support for both light and dark mode
+### Alarms
+- **Single alarm**: one tap on **+**, pick a time on the wheel, done. Turns itself off after ringing (flip the switch to reuse it). Tap a card to edit.
+- **Interval alarms**: a series of alarms between two times, every 2 / 5 / 8 / 10 min (2 min default). Ranges past midnight (e.g. 11 PM → 1 AM) work.
+- **One list**, sorted by time. Switch groups on/off, expand to remove single times, swipe left to delete.
+- **"Next alarm in …"** countdown at the top.
 
-## How It Works
+### Timer
+- h / m / s wheels with a dial tick sound + haptic; quick presets 1 · 5 · 10 · 15 min.
+- Draining ring with time left and end time; pause/resume, cancel, **+1:00**.
+- Rings with the full alarm screen (“Time's up”); live countdown notification while running.
 
-1. **Set Interval Range**: Choose a start time and end time for your alarms
-2. **Choose Interval**: Select how frequently alarms should trigger (2, 5, 8, or 10 minutes)
-3. **View Alarms**: See your alarms in expandable groups organized by time range
-4. **Manage Alarms**:
-   - Delete entire groups with the red delete button
-   - Expand groups to delete individual alarms
-   - Alarms persist even after closing the app
-5. **Dismiss Alarms**: When an alarm rings, tap the "Off" button to dismiss it
-   - Other alarms in the series remain active and will ring as scheduled
+### Stopwatch
+- Big digits with a sweeping dot; start/pause, lap, reset.
+- Laps newest on top, fastest in green, slowest in red.
+- Keeps counting with the app closed.
 
-## Technical Implementation
+### Ringing
+- Full-screen ring screen that shows **over the lock screen** (no unlock needed) — swipe up to turn OFF.
+- Ringtone: any system **tone**, or a **video** (plays fullscreen with its audio, loops until OFF). Only one video is kept; picking a tone removes it.
+- Follows your phone's **alarm volume**. Keeps ringing until you turn it off.
 
-- **Platform**: Built with Flutter for cross-platform support
-- **Native Integration**: Uses platform channels to communicate with native Android alarm APIs
-- **Background Operation**:
-  - Alarms work even when the app is closed or device is locked
-  - Uses Android AlarmManager for reliable scheduling
-  - Implements Foreground Service for launching alarms over other apps
-- **Persistent Storage**: SharedPreferences for saving alarm state across app restarts
-- **Redundant Scheduling**: Dual alarm system (exact + repeating) for maximum reliability
-- **Battery Optimization**: Works around Android Doze mode restrictions
-- **Permission Handling**: Requests necessary permissions (SYSTEM_ALERT_WINDOW, SCHEDULE_EXACT_ALARM, etc.)
-- **Efficient UI**: Organized expandable UI for managing large numbers of alarms
+### App
+- Bottom bar (icons only), **swipe between tabs**; settings gear stays fixed on every tab.
+- Settings: dark / light mode (instant), alarm ringtone.
+- Professional look in both light and dark mode; MIUI-style wheel time picker.
 
-## How Alarms Work Behind the Scenes
+## Reliability
 
-1. When you set interval alarms, the app creates multiple alarms at regular intervals
-2. Each alarm is scheduled twice:
-   - **Primary alarm**: Exact alarm that fires at precise time
-   - **Backup alarm**: Repeating daily alarm for redundancy
-3. When alarm time arrives:
-   - Android triggers the BroadcastReceiver
-   - A Foreground Service is started with high priority
-   - The alarm activity is launched, playing sound and displaying the alarm screen
-   - Notification is shown as backup visual indicator
-4. When you dismiss an alarm, both primary and backup alarms are cancelled
+- Every alarm has a **unique ID** → two groups can share a time without clashing.
+- Scheduled with `AlarmManager.setAlarmClock` (exempt from Doze, shows the ⏰ status icon).
+- All alarms + timer stored natively, so they're **restored after reboot**, app update, or clock / timezone change — without opening the app.
+- Video fallback: if a video can't start within 4 s, the tone rings so an alarm is never silent.
+- Built for **Android 5 (API 21) → Android 15**, with handling for Android 12 exact alarms, Android 13 notification permission, Android 14 foreground-service / full-screen-intent rules, and MIUI lock-screen permissions.
 
 ## Getting Started
 
 ### Prerequisites
+- Flutter SDK
+- Android SDK command-line tools (Android Studio not required)
+- An Android phone with USB debugging on (API 21+)
 
-- Flutter SDK (latest version)
-- Android Studio or VS Code with Flutter plugins
-- An Android device or emulator (API 21+)
-- Gradle 7.0+
+### Run
+```bash
+git clone https://github.com/tanvirakon/ak47clk.git
+cd ak47clk
+flutter pub get
+flutter run            # or: flutter run --release (smoother)
+```
 
-### Installation
+Or build and install manually:
+```bash
+flutter build apk --debug
+adb install -r build/app/outputs/flutter-apk/app-debug.apk
+```
 
-1. Clone this repository:
+> Native (Kotlin) changes need a full rebuild — hot reload only applies Dart changes.
 
-   ```bash
-   git clone https://github.com/tanvirakon/ak47clk.git
-   cd ak47clk
-   ```
-
-2. Install dependencies:
-
-   ```bash
-   flutter pub get
-   ```
-
-3. Connect your Android device or start an emulator
-
-4. Run the app:
-   ```bash
-   flutter run
-   ```
-
-### Important Permissions
-
-When you first run the app, you'll be asked to grant:
-
-- **SCHEDULE_EXACT_ALARM**: To schedule alarms at precise times
-- **SYSTEM_ALERT_WINDOW**: To display alarms over other apps
-- **WAKE_LOCK**: To wake your device when alarms trigger
-
-Grant these permissions for the app to work properly.
+### Permissions asked on first launch
+- Exact alarms, notifications (Android 13+), full-screen alerts (Android 14+)
+- Display over other apps, ignore battery optimization
+- **MIUI / Xiaomi**: if a banner says the alarm can't show on the lock screen, tap it and allow *Show on Lock screen* and *Display pop-up windows while running in the background*.
 
 ## Troubleshooting
 
-### Alarms not ringing?
-
-1. Make sure you've granted all necessary permissions
-2. Check that your phone's alarm volume is not muted
-3. Ensure the app is not being killed by battery optimization
-4. Restart the app and try again
-
-### Alarms showing up as notifications but not launching?
-
-- Grant the SYSTEM_ALERT_WINDOW permission in app settings
-- Go to Settings > Apps > AK47 Clock > Permissions > Display over other apps > Allow
-
-### Alarms not persisting after restart?
-
-- This may indicate a storage issue; try reinstalling the app
+- **Alarm rings but screen doesn't show on lock screen** → allow the MIUI permissions above / full-screen alerts.
+- **No sound** → check the phone's alarm volume.
+- **Alarm late or missing** → set battery saver for the app to *No restrictions*.
 
 ## Project Structure
 
 ```
-ak47clk/
-├── lib/
-│   ├── main.dart              # App entry point
-│   ├── alarm_page.dart        # Main UI for setting and managing alarms
-│   ├── theme_provider.dart    # Theme management (light/dark mode)
-│   └── ...
-├── android/
-│   ├── app/src/main/
-│   │   ├── AndroidManifest.xml
-│   │   └── kotlin/com/example/ak47clk/
-│   │       ├── MainActivity.kt       # Main Android activity & alarm setup
-│   │       ├── AlarmReceiver.kt      # Broadcasts receiver for alarm triggers
-│   │       ├── AlarmService.kt       # Foreground service for launching alarms
-│   │       ├── AlarmActivity.kt      # Full-screen alarm display activity
-│   │       └── BootReceiver.kt       # Restores alarms after device boot
-│   └── ...
-└── pubspec.yaml               # Flutter dependencies
+lib/
+├── main.dart               # App entry, light/dark themes
+├── home_shell.dart         # Bottom bar + swipeable tabs + settings gear
+├── alarm_page.dart         # Alarm list, add/edit bubble card
+├── timer_page.dart         # Countdown timer
+├── stopwatch_page.dart     # Stopwatch + laps
+├── clock_widgets.dart      # Shared round buttons, ring painter
+├── wheel_time_picker.dart  # Wheel picker + dial tick
+├── settings_page.dart      # Dark mode, ringtone (tone / video)
+└── theme_provider.dart
+
+android/app/src/main/kotlin/com/example/ak47clk/
+├── MainActivity.kt         # Method channel, permissions, pickers
+├── AlarmStore.kt           # Alarm storage (JSON), unique IDs, migration
+├── AlarmScheduler.kt       # AlarmManager scheduling / reschedule all
+├── TimerStore.kt           # Timer state + countdown notification
+├── AlarmReceiver.kt        # Alarm fired → start service
+├── AlarmService.kt         # Foreground service: tone, vibration, notification
+├── AlarmActivity.kt        # Full-screen ring screen (lock screen, video)
+├── BootReceiver.kt         # Restore after reboot / update / time change
+├── RingtoneStore.kt        # Tone / video ringtone storage
+├── TickSound.kt            # Wheel tick sound
+└── MiuiPermissions.kt      # MIUI lock-screen permission check
 ```
 
 ## Dependencies
 
-- `flutter_launcher_icons`: For custom app icon
-- `provider`: State management
-- `shared_preferences`: Local data persistence
-- `intl`: Date/time formatting
+- `provider` — theme state
+- `shared_preferences` — settings, stopwatch state
+- `intl` — time formatting
+- `flutter_launcher_icons` — app icon
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- Flutter team for the excellent cross-platform framework
-- Android documentation for AlarmManager and Foreground Services
-- Community feedback for bug fixes and improvements
-
-## Version History
-
-### v1.0.0 (Current)
-
-- Initial release
-- Full interval alarm functionality
-- Persistent alarm storage
-- Reliable alarm ringing across all Android versions
-- Dark/Light theme support
-- Organized alarm management UI
-
----
-
-**Note**: This app is optimized for Android. iOS support may be added in future versions.
+MIT — see LICENSE.

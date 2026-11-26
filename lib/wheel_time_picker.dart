@@ -10,6 +10,61 @@ void _wheelTick() {
   _tickChannel.invokeMethod('wheelTick').catchError((_) => null);
 }
 
+/// Standalone looping number wheel (same look + tick as the time picker). Used by Timer.
+class DialWheel extends StatelessWidget {
+  final FixedExtentScrollController controller;
+  final int count;
+  final int value;
+  final ValueChanged<int> onChanged;
+  final double itemExtent;
+  final double selectedSize;
+
+  const DialWheel({
+    super.key,
+    required this.controller,
+    required this.count,
+    required this.value,
+    required this.onChanged,
+    this.itemExtent = 64,
+    this.selectedSize = 44,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final fg = isDark ? Colors.white : Colors.black87;
+    final dim = isDark ? Colors.white38 : Colors.black38;
+    return ListWheelScrollView.useDelegate(
+      controller: controller,
+      itemExtent: itemExtent,
+      physics: const FixedExtentScrollPhysics(),
+      diameterRatio: 2.5,
+      perspective: 0.002,
+      overAndUnderCenterOpacity: 0.8,
+      onSelectedItemChanged: (raw) {
+        _wheelTick();
+        onChanged(((raw % count) + count) % count);
+      },
+      childDelegate: ListWheelChildLoopingListDelegate(
+        children: List.generate(count, (i) {
+          final sel = i == value;
+          return Center(
+            child: Text(
+              i.toString().padLeft(2, '0'),
+              style: TextStyle(
+                fontSize: sel ? selectedSize : selectedSize * 0.75,
+                color: sel ? fg : dim,
+                fontWeight: sel ? FontWeight.w500 : FontWeight.w300,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          );
+        }),
+      ),
+    );
+  }
+}
+
 /// Bottom-sheet wheel time picker (AM/PM | hour | minute).
 Future<TimeOfDay?> showWheelTimePicker(
   BuildContext context, {

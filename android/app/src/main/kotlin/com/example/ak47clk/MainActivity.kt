@@ -144,6 +144,14 @@ class MainActivity : FlutterActivity() {
 
                     "wheelTick" -> { TickSound.play(); result.success(null) }
 
+                    // ---------- countdown timer ----------
+                    "getTimer" -> result.success(TimerStore.getJson(this))
+                    "setTimer" -> {
+                        fun long(k: String) = (call.argument<Number>(k) ?: 0).toLong()
+                        TimerStore.set(this, long("end"), long("left"), long("total"))
+                        result.success(true)
+                    }
+
                     // ---------- MIUI lock screen ----------
                     "lockScreenPermissionOk" -> result.success(MiuiPermissions.allGranted(this))
                     "openLockScreenPermission" -> { MiuiPermissions.openEditor(this); result.success(true) }

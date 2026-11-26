@@ -76,7 +76,11 @@ class AlarmActivity : AppCompatActivity() {
         // Show the alarm's label (if any) under the date.
         val alarmId = intent.getIntExtra(AlarmScheduler.EXTRA_ID, -1)
         val label = try {
-            if (alarmId != -1) AlarmStore.findByAlarmId(this, alarmId)?.label else null
+            when (alarmId) {
+                AlarmScheduler.TIMER_ID -> "Time's up"
+                -1 -> null
+                else -> AlarmStore.findByAlarmId(this, alarmId)?.label
+            }
         } catch (e: Exception) { null }
         if (!label.isNullOrBlank()) {
             findViewById<TextView>(R.id.labelTextView).apply {

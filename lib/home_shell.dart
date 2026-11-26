@@ -2,6 +2,8 @@
 import 'package:flutter/material.dart';
 import 'alarm_page.dart';
 import 'settings_page.dart';
+import 'stopwatch_page.dart';
+import 'timer_page.dart';
 
 /// App shell with the bottom tab bar: Alarm | Timer | Stopwatch.
 class HomeShell extends StatefulWidget {
@@ -35,8 +37,8 @@ class _HomeShellState extends State<HomeShell> {
             },
             children: const [
               _KeepAlive(child: AlarmPage()),
-              _KeepAlive(child: _ComingSoon(icon: Icons.hourglass_empty_rounded)),
-              _KeepAlive(child: _ComingSoon(icon: Icons.timer_outlined)),
+              _KeepAlive(child: TimerPage()),
+              _KeepAlive(child: StopwatchPage()),
             ],
           ),
           // Settings gear stays fixed while tabs slide underneath.
@@ -103,24 +105,3 @@ class _KeepAliveState extends State<_KeepAlive> with AutomaticKeepAliveClientMix
   }
 }
 
-class _ComingSoon extends StatelessWidget {
-  final IconData icon;
-  const _ComingSoon({required this.icon});
-
-  @override
-  Widget build(BuildContext context) {
-    final dim = Theme.of(context).brightness == Brightness.dark ? Colors.white38 : Colors.black38;
-    return SafeArea(
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 56, color: dim),
-            const SizedBox(height: 12),
-            Text('Coming soon', style: TextStyle(color: dim, fontSize: 16)),
-          ],
-        ),
-      ),
-    );
-  }
-}

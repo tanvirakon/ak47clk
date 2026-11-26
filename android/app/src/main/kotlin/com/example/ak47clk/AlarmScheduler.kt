@@ -37,10 +37,23 @@ object AlarmScheduler {
         if (timeInMillis <= System.currentTimeMillis()) add(Calendar.DAY_OF_YEAR, 1)
     }.timeInMillis
 
-    fun schedule(c: Context, a: AlarmStore.Alarm) {
+    /** Request code of the countdown timer (below alarm ids 100_000+, above legacy codes <= 2359). */
+    const val TIMER_ID = 99_000
+
+    private fun timerAlarm(at: Long): AlarmStore.Alarm {
+        val cal = Calendar.getInstance().apply { timeInMillis = at }
+        return AlarmStore.Alarm(TIMER_ID, cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE))
+    }
+
+    fun scheduleTimer(c: Context, at: Long) = scheduleAt(c, pending(c, timerAlarm(at)), at)
+
+    fun cancelTimer(c: Context) = cancel(c, timerAlarm(System.currentTimeMillis()))
+
+    fun schedule(c: Context, a: AlarmStore.Alarm) =
+        scheduleAt(c, pending(c, a), nextTrigger(a.hour, a.minute))
+
+    private fun scheduleAt(c: Context, op: PendingIntent, at: Long) {
         val am = c.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val at = nextTrigger(a.hour, a.minute)
-        val op = pending(c, a)
         try {
             val canExact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S || am.canScheduleExactAlarms()
             if (canExact) {
@@ -87,6 +100,7 @@ object AlarmScheduler {
                 if (g.enabled) { schedule(c, a); n++ } else cancel(c, a)
             }
         }
+        TimerStore.restore(c)
         Log.d(TAG, "Rescheduled $n alarms")
     }
 }
