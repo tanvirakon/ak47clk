@@ -1,4 +1,4 @@
-package com.example.ak47clk
+﻿package com.example.ak47clk
 
 import android.app.AlarmManager
 import android.content.Context
@@ -23,11 +23,7 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        requestBatteryOptimizationExemption()
-        requestOverlayPermission()
-        requestExactAlarmPermissionIfNeeded()
-        requestNotificationPermissionIfNeeded()
-        requestFullScreenIntentIfNeeded()
+        // No permission popups on launch: the Alarm page lists missing ones as tappable banners.
         TickSound.init(this)
 
         // Import alarms from the old storage format once, and schedule them under new ids.
@@ -156,6 +152,10 @@ class MainActivity : FlutterActivity() {
                     "lockScreenPermissionOk" -> result.success(MiuiPermissions.allGranted(this))
                     "openLockScreenPermission" -> { MiuiPermissions.openEditor(this); result.success(true) }
 
+                    // ---------- permission banners ----------
+                    "missingPermissions" -> result.success(missingPermissions())
+                    "openPermission" -> { openPermission(call.argument<String>("key") ?: ""); result.success(true) }
+
                     else -> result.notImplemented()
                 }
             } catch (e: Exception) {
@@ -202,54 +202,62 @@ class MainActivity : FlutterActivity() {
 
     // ---------------- permissions ----------------
 
-    private fun requestBatteryOptimizationExemption() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        if (pm.isIgnoringBatteryOptimizations(packageName)) return
-        try {
-            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
-        } catch (e: Exception) {
-            Log.e(TAG, "Battery optimization request failed", e)
+    /** Keys of permissions still missing, in display order. Each check is version-guarded. */
+    private fun missingPermissions(): List<String> {
+        val out = mutableListOf<String>()
+        if (!androidx.core.app.NotificationManagerCompat.from(this).areNotificationsEnabled()) out.add("notifications")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            !(getSystemService(Context.ALARM_SERVICE) as AlarmManager).canScheduleExactAlarms()) out.add("exactAlarm")
+        if (Build.VERSION.SDK_INT >= 34 &&
+            !getSystemService(android.app.NotificationManager::class.java).canUseFullScreenIntent()) out.add("fullScreen")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) out.add("overlay")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            !(getSystemService(Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)) out.add("battery")
+        if (!MiuiPermissions.allGranted(this)) out.add("miuiLockScreen")
+        return out
+    }
+
+    private fun openPermission(key: String) {
+        when (key) {
+            "notifications" -> {
+                val prefs = getSharedPreferences("settings_prefs", Context.MODE_PRIVATE)
+                // Android 13+: first tap shows the system dialog; after that (or if denied) open settings.
+                if (Build.VERSION.SDK_INT >= 33 && !prefs.getBoolean("notif_asked", false)) {
+                    prefs.edit().putBoolean("notif_asked", true).apply()
+                    requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 4749)
+                } else {
+                    openSettings(
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                        else null
+                    )
+                }
+            }
+            "exactAlarm" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                openSettings(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:$packageName")))
+            "fullScreen" -> if (Build.VERSION.SDK_INT >= 34)
+                openSettings(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:$packageName")))
+            "overlay" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                openSettings(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            "battery" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                openSettings(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            "miuiLockScreen" -> MiuiPermissions.openEditor(this)
         }
     }
 
-    private fun requestOverlayPermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || Settings.canDrawOverlays(this)) return
+    /** Open a settings screen; fall back to the app's info page if this phone doesn't have it. */
+    private fun openSettings(intent: Intent?) {
         try {
-            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            if (intent != null) { startActivity(intent); return }
         } catch (e: Exception) {
-            Log.e(TAG, "Overlay permission request failed", e)
+            Log.w(TAG, "Settings screen not available, opening app details", e)
+        }
+        try {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not open app settings", e)
         }
     }
 
-    /** Android 13+: notifications are opt-in; the ringing alarm uses one. */
-    private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < 33) return
-        if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
-            android.content.pm.PackageManager.PERMISSION_GRANTED) return
-        requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 4749)
-    }
-
-    /** Android 14+: full-screen alarm over the lock screen can be switched off per app. */
-    private fun requestFullScreenIntentIfNeeded() {
-        if (Build.VERSION.SDK_INT < 34) return
-        val nm = getSystemService(android.app.NotificationManager::class.java)
-        if (nm.canUseFullScreenIntent()) return
-        try {
-            startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:$packageName")))
-        } catch (e: Exception) {
-            Log.e(TAG, "Full-screen intent settings failed", e)
-        }
-    }
-
-    private fun requestExactAlarmPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
-        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        if (am.canScheduleExactAlarms()) return
-        try {
-            startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:$packageName")))
-        } catch (e: Exception) {
-            Log.e(TAG, "Exact alarm permission request failed", e)
-        }
-    }
 }

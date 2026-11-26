@@ -78,12 +78,33 @@ class AlarmGroup {
 }
 
 class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
-  bool _lockScreenOk = true;
+  /// Missing permission keys from native, shown as tappable banners (no popups on launch).
+  List<String> _missingPerms = [];
+
+  static const _permInfo = <String, (IconData, String, String)>{
+    'notifications': (Icons.notifications_none_rounded, 'Allow notifications',
+        'Needed to show the alarm and timer.'),
+    'exactAlarm': (Icons.alarm_on_outlined, 'Allow alarms & reminders',
+        'So alarms ring at the exact time.'),
+    'fullScreen': (Icons.fullscreen_rounded, 'Allow full-screen alarms',
+        'Shows the ring screen when the phone is locked.'),
+    'overlay': (Icons.layers_outlined, 'Display over other apps',
+        'Lets the alarm open on top of other apps.'),
+    'battery': (Icons.battery_alert_outlined, 'Remove battery restriction',
+        'Stops the phone from delaying or killing alarms.'),
+    'miuiLockScreen': (Icons.lock_outline, 'Show on lock screen',
+        'Allow "Show on Lock screen" and "Display pop-up windows while running in the background".'),
+  };
 
   Future<void> _checkLockScreenPermission() async {
     try {
-      final ok = await platform.invokeMethod<bool>('lockScreenPermissionOk') ?? true;
-      if (mounted && ok != _lockScreenOk) setState(() => _lockScreenOk = ok);
+      final list = (await platform.invokeMethod<List>('missingPermissions') ?? [])
+          .cast<String>()
+          .where(_permInfo.containsKey)
+          .toList();
+      if (mounted && list.join(',') != _missingPerms.join(',')) {
+        setState(() => _missingPerms = list);
+      }
     } catch (_) {}
   }
 
@@ -103,34 +124,35 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  Widget _lockScreenBanner() {
+  Widget _permissionBanner(String key) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final amber = isDark ? const Color(0xFFFFCC80) : const Color(0xFF9A5B00);
+    final (icon, title, sub) = _permInfo[key]!;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
       child: Material(
         color: amber.withValues(alpha: isDark ? 0.12 : 0.10),
         borderRadius: BorderRadius.circular(20),
         child: InkWell(
           borderRadius: BorderRadius.circular(20),
-          onTap: () => platform.invokeMethod('openLockScreenPermission'),
+          onTap: () async {
+            await platform.invokeMethod('openPermission', {'key': key});
+            // Re-check shortly after (system dialogs may not trigger a resume).
+            Future.delayed(const Duration(seconds: 1), _checkLockScreenPermission);
+          },
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
+            padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
             child: Row(
               children: [
-                Icon(Icons.lock_outline, color: amber),
+                Icon(icon, color: amber),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Alarm can\'t show on lock screen',
-                          style: TextStyle(color: amber, fontWeight: FontWeight.w600)),
+                      Text(title, style: TextStyle(color: amber, fontWeight: FontWeight.w600)),
                       const SizedBox(height: 2),
-                      Text(
-                        'Tap → allow "Show on Lock screen" and "Display pop-up windows while running in the background".',
-                        style: TextStyle(color: amber.withValues(alpha: 0.85), fontSize: 13),
-                      ),
+                      Text(sub, style: TextStyle(color: amber.withValues(alpha: 0.85), fontSize: 13)),
                     ],
                   ),
                 ),
@@ -314,7 +336,8 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
                 ),
               ),
             ),
-            if (!_lockScreenOk) _lockScreenBanner(),
+            for (final key in _missingPerms) _permissionBanner(key),
+            if (_missingPerms.isNotEmpty) const SizedBox(height: 4),
             Expanded(child: _buildAlarmsList()),
           ],
         ),
