@@ -7,13 +7,16 @@ A clean, reliable clock app for Android built with Flutter + native Kotlin. Alar
 ### Alarms
 - **Single alarm**: one tap on **+**, pick a time on the wheel, done. Turns itself off after ringing (flip the switch to reuse it). Tap a card to edit.
 - **Interval alarms**: a series of alarms between two times, every 2 / 5 / 8 / 10 min (2 min default). Ranges past midnight (e.g. 11 PM → 1 AM) work.
-- **One list**, sorted by time. Switch groups on/off, expand to remove single times, swipe left to delete.
+- **One list**, sorted by time. Switch groups on/off, expand to remove single times. **Long-press** a card to select (select all / cancel) and delete several at once.
+- **Repeat**: Once (default), Daily, or custom days (Sat → Fri) — for single and interval alarms.
+- **Skip next**: switching off a repeating alarm asks *Off for tomorrow only* or *Turn off*.
+- **Snooze**: on the ring screen drag the pill down onto **5 / 10 / 15 min** (swipe up = OFF).
 - **"Next alarm in …"** countdown at the top.
 
 ### Timer
 - h / m / s wheels with a dial tick sound + haptic; quick presets 1 · 5 · 10 · 15 min.
 - Draining ring with time left and end time; pause/resume, cancel, **+1:00**.
-- Rings with the full alarm screen (“Time's up”); live countdown notification while running.
+- Rings with the full alarm screen (“Time's up”), even with the app closed.
 
 ### Stopwatch
 - Big digits with a sweeping dot; start/pause, lap, reset.
@@ -27,7 +30,8 @@ A clean, reliable clock app for Android built with Flutter + native Kotlin. Alar
 
 ### App
 - Bottom bar (icons only), **swipe between tabs**; settings gear stays fixed on every tab.
-- Settings: dark / light mode (instant), alarm ringtone.
+- Settings: dark / light mode, **accent colour** (6 choices), alarm ringtone, **Test alarm** (rings in 10 s to check volume / lock screen).
+- Bouncy switches with haptics; animated sleepy-clock empty screen.
 - Professional look in both light and dark mode; MIUI-style wheel time picker.
 
 ## Reliability
@@ -90,7 +94,7 @@ android/app/src/main/kotlin/com/example/ak47clk/
 ├── MainActivity.kt         # Method channel, permissions, pickers
 ├── AlarmStore.kt           # Alarm storage (JSON), unique IDs, migration
 ├── AlarmScheduler.kt       # AlarmManager scheduling / reschedule all
-├── TimerStore.kt           # Timer state + countdown notification
+├── TimerStore.kt           # Timer state (rings natively)
 ├── AlarmReceiver.kt        # Alarm fired → start service
 ├── AlarmService.kt         # Foreground service: tone, vibration, notification
 ├── AlarmActivity.kt        # Full-screen ring screen (lock screen, video)

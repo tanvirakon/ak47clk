@@ -21,8 +21,8 @@ class MyApp extends StatelessWidget {
           return MaterialApp(
             title: 'ak47clk',
             debugShowCheckedModeBanner: false,
-            theme: _buildLightTheme(),
-            darkTheme: _buildDarkTheme(),
+            theme: _buildLightTheme(themeProvider.accent.light),
+            darkTheme: _buildDarkTheme(themeProvider.accent.dark),
             themeMode: themeProvider.isDarkMode ? ThemeMode.dark : ThemeMode.light,
             home: const HomeShell(),
           );
@@ -31,21 +31,18 @@ class MyApp extends StatelessWidget {
     );
   }
 
-  // Shared accent (matches alarm_page _accent): calm blue, no Material purple.
-  static const _lightAccent = Color(0xFF3B6FD8);
-  static const _darkAccent = Color(0xFF8AB4F8);
-
-  ThemeData _buildLightTheme() => _theme(
+  // Accent comes from Settings (ThemeProvider.accents); pages read it via colorScheme.primary.
+  ThemeData _buildLightTheme(Color accent) => _theme(
         brightness: Brightness.light,
-        accent: _lightAccent,
+        accent: accent,
         bg: const Color(0xFFFAFAFC),
         surface: const Color(0xFFF3F4F7),
         fg: const Color(0xFF1C1D21),
       );
 
-  ThemeData _buildDarkTheme() => _theme(
+  ThemeData _buildDarkTheme(Color accent) => _theme(
         brightness: Brightness.dark,
-        accent: _darkAccent,
+        accent: accent,
         bg: const Color(0xFF0E0F12),
         surface: const Color(0xFF1E1F23),
         fg: const Color(0xFFECEDEF),

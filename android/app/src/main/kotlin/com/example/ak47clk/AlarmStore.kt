@@ -30,9 +30,23 @@ object AlarmStore {
         val interval: Int?,
         var enabled: Boolean,
         val alarms: MutableList<Alarm>,
-        val single: Boolean = false,   // normal one-time alarm (one time, turns itself off after ringing)
+        val single: Boolean = false,   // normal alarm (one time) instead of an interval range
         val label: String? = null,
-    )
+        /** Repeat days bitmask: bit (Calendar.DAY_OF_WEEK - 1), Sun = bit 0 .. Sat = bit 6. 0 = Once. */
+        val days: Int = 0,
+        /** "Skip next": rings before this time are skipped (0 = none). */
+        var skipUntil: Long = 0,
+        /** First ring that is being skipped (for the "Skipping Thu" note). */
+        var skipAt: Long = 0,
+    ) {
+        val repeats get() = days != 0
+        /** Minutes past midnight where one "run" of this group starts. */
+        val startMin get() = if (fromHour != null && fromMinute != null) fromHour * 60 + fromMinute
+            else alarms.firstOrNull()?.let { it.hour * 60 + it.minute } ?: 0
+        fun offsetOf(a: Alarm) = ((a.hour * 60 + a.minute) - startMin + 1440) % 1440
+    }
+
+    const val DAILY = 0x7F
 
     private fun prefs(c: Context) = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -65,11 +79,25 @@ object AlarmStore {
         return id
     }
 
-    /** JSON handed to Flutter. */
-    fun toJsonString(groups: List<Group>): String {
+    /**
+     * JSON handed to Flutter, plus "nextAt" (next ring of enabled groups, after skips)
+     * and "snoozeAt" (earliest pending snooze of any of its alarms).
+     */
+    fun toJsonString(c: Context, groups: List<Group>): String {
+        val snoozes = AlarmScheduler.pendingSnoozes(c)
         val arr = JSONArray()
-        groups.forEach { arr.put(groupToJson(it)) }
+        groups.forEach { g ->
+            arr.put(groupToJson(g).apply {
+                if (g.enabled && g.alarms.isNotEmpty()) put("nextAt", g.alarms.minOf { AlarmScheduler.nextTrigger(g, it) })
+                g.alarms.mapNotNull { snoozes[it.id] }.minOrNull()?.let { put("snoozeAt", it) }
+            })
+        }
         return arr.toString()
+    }
+
+    /** Cancel every pending snooze of a group (alarm itself unchanged). */
+    fun cancelSnoozes(c: Context, groupId: Int) {
+        load(c).find { it.id == groupId }?.alarms?.forEach { AlarmScheduler.cancelSnooze(c, it.id) }
     }
 
     // ---------------- operations ----------------
@@ -93,12 +121,12 @@ object AlarmStore {
         return out
     }
 
-    fun createGroup(c: Context, fromH: Int, fromM: Int, toH: Int, toM: Int, interval: Int): Group {
+    fun createGroup(c: Context, fromH: Int, fromM: Int, toH: Int, toM: Int, interval: Int, days: Int): Group {
         val groups = load(c)
         val alarms = intervalTimes(fromH, fromM, toH, toM, interval)
             .map { (h, m) -> Alarm(newId(c), h, m) }
             .toMutableList()
-        val g = Group(newId(c), fromH, fromM, toH, toM, interval, true, alarms)
+        val g = Group(newId(c), fromH, fromM, toH, toM, interval, true, alarms, days = days and DAILY)
         groups.add(g)
         save(c, groups)
         return g
@@ -106,40 +134,84 @@ object AlarmStore {
 
     private fun cleanLabel(label: String?) = label?.trim()?.take(60)?.ifEmpty { null }
 
-    /** Normal one-time alarm. */
-    fun createSingle(c: Context, h: Int, m: Int, label: String?): Group {
+    /** Normal alarm (one time). */
+    fun createSingle(c: Context, h: Int, m: Int, label: String?, days: Int): Group {
         val groups = load(c)
         val g = Group(
             id = newId(c), fromHour = null, fromMinute = null, toHour = null, toMinute = null,
             interval = null, enabled = true, alarms = mutableListOf(Alarm(newId(c), h, m)),
-            single = true, label = cleanLabel(label),
+            single = true, label = cleanLabel(label), days = days and DAILY,
         )
         groups.add(g)
         save(c, groups)
         return g
     }
 
-    /** Change time/label of a single alarm. Keeps its alarm id; turns it back on. Returns the new alarm. */
-    fun updateSingle(c: Context, groupId: Int, h: Int, m: Int, label: String?): Alarm? {
+    /** Change time/label/days of a single alarm. Keeps its alarm id; turns it back on, clears skip. */
+    fun updateSingle(c: Context, groupId: Int, h: Int, m: Int, label: String?, days: Int): Group? {
         val groups = load(c)
         val i = groups.indexOfFirst { it.id == groupId && it.single }
         if (i < 0) return null
         val old = groups[i]
         val alarm = Alarm(old.alarms.firstOrNull()?.id ?: newId(c), h, m)
-        groups[i] = old.copy(enabled = true, alarms = mutableListOf(alarm), label = cleanLabel(label))
+        val g = old.copy(
+            enabled = true, alarms = mutableListOf(alarm), label = cleanLabel(label),
+            days = days and DAILY, skipUntil = 0, skipAt = 0,
+        )
+        groups[i] = g
         save(c, groups)
-        return alarm
+        return g
     }
 
-    /** Called when an alarm rings: a single alarm switches itself off. Returns its group. */
+    /**
+     * An alarm rang. Once: a single alarm switches off; an interval group switches off after its
+     * last time. Repeating: schedule this alarm's next ring.
+     */
     fun onFired(c: Context, alarmId: Int): Group? {
         val groups = load(c)
         val g = groups.find { gr -> gr.alarms.any { it.id == alarmId } } ?: return null
-        if (g.single && g.enabled) {
+        val a = g.alarms.first { it.id == alarmId }
+        if (!g.enabled) return g
+        if (g.repeats) {
+            AlarmScheduler.schedule(c, g, a, System.currentTimeMillis() + 60_000)
+        } else if (g.single || g.offsetOf(a) == g.alarms.maxOf { g.offsetOf(it) }) {
             g.enabled = false
+            g.alarms.forEach { if (it.id != alarmId) AlarmScheduler.cancel(c, it) }
             save(c, groups)
         }
         return g
+    }
+
+    /** Skip the next ring (whole next run for interval groups). Returns false if not repeating. */
+    fun skipNext(c: Context, groupId: Int): Boolean {
+        val groups = load(c)
+        val g = groups.find { it.id == groupId } ?: return false
+        if (!g.repeats || g.alarms.isEmpty()) return false
+        val now = System.currentTimeMillis()
+        val first = g.alarms.minByOrNull { AlarmScheduler.nextTrigger(g, it, now) }!!
+        val t0 = AlarmScheduler.nextTrigger(g, first, now)
+        val runStart = t0 - g.offsetOf(first) * 60_000L
+        val runEnd = runStart + g.alarms.maxOf { g.offsetOf(it) } * 60_000L
+        g.enabled = true
+        g.skipAt = t0
+        g.skipUntil = runEnd + 1
+        save(c, groups)
+        g.alarms.forEach { AlarmScheduler.schedule(c, g, it); AlarmScheduler.cancelSnooze(c, it.id) }
+        return true
+    }
+
+    /** Turn a group on/off. Clears any skip; off also cancels snoozes. */
+    fun setEnabled(c: Context, groupId: Int, enabled: Boolean) {
+        val groups = load(c)
+        val g = groups.find { it.id == groupId } ?: return
+        g.enabled = enabled
+        g.skipUntil = 0
+        g.skipAt = 0
+        save(c, groups)
+        g.alarms.forEach {
+            if (enabled) AlarmScheduler.schedule(c, g, it)
+            else { AlarmScheduler.cancel(c, it); AlarmScheduler.cancelSnooze(c, it.id) }
+        }
     }
 
     fun findByAlarmId(c: Context, alarmId: Int): Group? =
@@ -157,6 +229,8 @@ object AlarmStore {
         put("enabled", g.enabled)
         if (g.single) put("single", true)
         g.label?.let { put("label", it) }
+        put("days", g.days)
+        if (g.skipUntil > 0) put("skipUntil", g.skipUntil).put("skipAt", g.skipAt)
         put("alarms", JSONArray().apply {
             g.alarms.forEach { a ->
                 put(JSONObject().put("id", a.id).put("hour", a.hour).put("minute", a.minute))
@@ -167,6 +241,7 @@ object AlarmStore {
     private fun groupFromJson(o: JSONObject): Group {
         fun optInt(k: String) = if (o.has(k)) o.getInt(k) else null
         val arr = o.getJSONArray("alarms")
+        val single = o.optBoolean("single", false)
         return Group(
             id = o.getInt("id"),
             fromHour = optInt("fromHour"), fromMinute = optInt("fromMinute"),
@@ -177,8 +252,12 @@ object AlarmStore {
                 val a = arr.getJSONObject(i)
                 Alarm(a.getInt("id"), a.getInt("hour"), a.getInt("minute"))
             },
-            single = o.optBoolean("single", false),
+            single = single,
             label = if (o.has("label")) o.getString("label") else null,
+            // Saved before repeat days existed: singles were Once, interval groups meant Daily.
+            days = if (o.has("days")) o.getInt("days") else if (single) 0 else DAILY,
+            skipUntil = o.optLong("skipUntil", 0),
+            skipAt = o.optLong("skipAt", 0),
         )
     }
 

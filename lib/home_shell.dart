@@ -26,12 +26,21 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   Widget build(BuildContext context) {
+    // While alarms are being selected: no tab bar, no gear, no swiping.
+    return ValueListenableBuilder<bool>(
+      valueListenable: alarmSelecting,
+      builder: (context, selecting, _) => _scaffold(selecting),
+    );
+  }
+
+  Widget _scaffold(bool selecting) {
     return Scaffold(
       // Swipe left/right between tabs. _KeepAlive = tabs don't reload when you come back.
       body: Stack(
         children: [
           PageView(
             controller: _pager,
+            physics: selecting ? const NeverScrollableScrollPhysics() : null,
             onPageChanged: (i) {
               if (!_jumping) setState(() => _tab = i);
             },
@@ -42,7 +51,7 @@ class _HomeShellState extends State<HomeShell> {
             ],
           ),
           // Settings gear stays fixed while tabs slide underneath.
-          SafeArea(
+          if (!selecting) SafeArea(
             child: Align(
               alignment: Alignment.topRight,
               child: Padding(
@@ -60,7 +69,7 @@ class _HomeShellState extends State<HomeShell> {
           ),
         ],
       ),
-      bottomNavigationBar: NavigationBar(
+      bottomNavigationBar: selecting ? null : NavigationBar(
         selectedIndex: _tab,
         onDestinationSelected: (i) async {
           setState(() => _tab = i);

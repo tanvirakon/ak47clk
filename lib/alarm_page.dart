@@ -4,7 +4,11 @@ import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:intl/intl.dart';
+import 'clock_widgets.dart';
 import 'wheel_time_picker.dart';
+
+/// True while alarm cards are being selected (HomeShell hides the tab bar + gear, locks swiping).
+final ValueNotifier<bool> alarmSelecting = ValueNotifier(false);
 
 class AlarmPage extends StatefulWidget {
   const AlarmPage({super.key});
@@ -18,8 +22,12 @@ class AlarmGroup {
   final int id;
   final int? fromHour, fromMinute, toHour, toMinute, interval;
   final List<Map<String, dynamic>> alarms; // {id, hour, minute, formattedTime}
-  final bool single; // normal one-time alarm
+  final bool single; // normal alarm (not an interval range)
   final String? label;
+  final int days; // repeat bitmask: bit = weekday % 7 (Sun 0 .. Sat 6); 0 = Once
+  final int skipUntil, skipAt; // "off for next ring only"
+  final int? nextAt; // next ring (epoch ms) from native, after skips
+  final int? snoozeAt; // pending snooze (epoch ms)
   bool isEnabled;
   bool isExpanded;
 
@@ -27,6 +35,11 @@ class AlarmGroup {
     required this.id,
     this.single = false,
     this.label,
+    this.days = 0,
+    this.skipUntil = 0,
+    this.skipAt = 0,
+    this.nextAt,
+    this.snoozeAt,
     this.fromHour,
     this.fromMinute,
     this.toHour,
@@ -38,6 +51,30 @@ class AlarmGroup {
   });
 
   bool get isInterval => fromHour != null && toHour != null && interval != null;
+  bool get repeats => days != 0;
+  bool get isSkipping => isEnabled && skipUntil > DateTime.now().millisecondsSinceEpoch;
+  bool get isSnoozed => snoozeAt != null && snoozeAt! > DateTime.now().millisecondsSinceEpoch;
+
+  /// Switch shows ON while enabled, or while a snooze is still waiting (even if a Once alarm already rang).
+  bool get switchOn => isEnabled || isSnoozed;
+
+  /// Chip order Sat → Fri, as (bit, short name).
+  static const weekOrder = [(6, 'Sat'), (0, 'Sun'), (1, 'Mon'), (2, 'Tue'), (3, 'Wed'), (4, 'Thu'), (5, 'Fri')];
+
+  static String repeatText(int days) {
+    if (days == 0) return 'Once';
+    if (days == 0x7F) return 'Daily';
+    return weekOrder.where((d) => days & (1 << d.$1) != 0).map((d) => d.$2).join(', ');
+  }
+
+  /// "today" / "tomorrow" / "Thu"
+  static String dayWord(DateTime t) {
+    final now = DateTime.now();
+    final d = DateTime(t.year, t.month, t.day).difference(DateTime(now.year, now.month, now.day)).inDays;
+    if (d == 0) return 'today';
+    if (d == 1) return 'tomorrow';
+    return DateFormat('EEE').format(t);
+  }
 
   /// True if the range wraps past midnight (e.g. 11 PM – 1 AM).
   bool get crossesMidnight =>
@@ -63,6 +100,11 @@ class AlarmGroup {
         id: j['id'] as int,
         single: j['single'] as bool? ?? false,
         label: j['label'] as String?,
+        days: (j['days'] as num?)?.toInt() ?? 0,
+        skipUntil: (j['skipUntil'] as num?)?.toInt() ?? 0,
+        skipAt: (j['skipAt'] as num?)?.toInt() ?? 0,
+        nextAt: (j['nextAt'] as num?)?.toInt(),
+        snoozeAt: (j['snoozeAt'] as num?)?.toInt(),
         fromHour: j['fromHour'] as int?,
         fromMinute: j['fromMinute'] as int?,
         toHour: j['toHour'] as int?,
@@ -120,6 +162,7 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    alarmSelecting.value = false;
     _labelCtrl.dispose();
     super.dispose();
   }
@@ -176,6 +219,62 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
   bool _singleMode = true;
   TimeOfDay _singleTime = TimeOfDay.now();
   final TextEditingController _labelCtrl = TextEditingController();
+  int _days = 0; // repeat draft (0 = Once), shared by single + interval
+
+  // Long-press selection (delete several at once)
+  bool _selecting = false;
+  final Set<int> _selected = {};
+
+  void _enterSelect(AlarmGroup g) {
+    HapticFeedback.mediumImpact();
+    setState(() {
+      _selecting = true;
+      _selected
+        ..clear()
+        ..add(g.id);
+    });
+    alarmSelecting.value = true;
+  }
+
+  void _exitSelect() {
+    setState(() {
+      _selecting = false;
+      _selected.clear();
+    });
+    alarmSelecting.value = false;
+  }
+
+  void _toggleSelected(AlarmGroup g) {
+    HapticFeedback.selectionClick();
+    setState(() => _selected.contains(g.id) ? _selected.remove(g.id) : _selected.add(g.id));
+  }
+
+  void _toggleSelectAll() {
+    setState(() {
+      if (_selected.length == _alarmGroups.length) {
+        _selected.clear();
+      } else {
+        _selected.addAll(_alarmGroups.map((g) => g.id));
+      }
+    });
+  }
+
+  Future<void> _deleteSelected() async {
+    final ids = _selected.toSet();
+    if (ids.isEmpty) return;
+    final count = _alarmGroups.where((g) => ids.contains(g.id)).fold<int>(0, (n, g) => n + g.alarms.length);
+    setState(() => _alarmGroups.removeWhere((g) => ids.contains(g.id)));
+    _exitSelect();
+    try {
+      for (final id in ids) {
+        await platform.invokeMethod('deleteGroup', {'groupId': id});
+      }
+      _toast(count == 1 ? 'Alarm deleted' : '$count alarms deleted');
+    } catch (e) {
+      _toast('Failed to delete: $e');
+    }
+    await _loadAlarms();
+  }
 
   @override
   void initState() {
@@ -208,10 +307,103 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
         g.isExpanded = expanded[g.id] ?? false;
       }
       groups.sort((a, b) => a.sortKey.compareTo(b.sortKey)); // one list, by time
-      if (mounted) setState(() => _alarmGroups = groups);
+      if (mounted) {
+        setState(() {
+          _alarmGroups = groups;
+          _selected.removeWhere((id) => !groups.any((g) => g.id == id));
+        });
+      }
     } catch (e) {
       debugPrint('Failed to load alarms: $e');
     }
+  }
+
+  /// Switch tapped. Turning OFF a repeating alarm asks: off for the next ring only, or fully off.
+  Future<void> _onSwitch(AlarmGroup group) async {
+    // Once alarm that already rang but is snoozed: switch off = stop the snooze.
+    if (!group.isEnabled && group.isSnoozed) {
+      await _cancelSnooze(group);
+      return;
+    }
+    if (!group.isEnabled || !group.repeats) {
+      final wasSnoozed = group.isSnoozed;
+      await _toggleAlarmGroup(group); // turning off also cancels its snooze (native)
+      if (wasSnoozed) _toast('Alarm off, snooze cancelled');
+      return;
+    }
+    final next = group.nextAt == null ? null : DateTime.fromMillisecondsSinceEpoch(group.nextAt!);
+    final skipping = group.isSkipping;
+    final choice = await _offSheet(group, next, skipping);
+    if (choice == 'snooze') {
+      await _cancelSnooze(group);
+    } else if (choice == 'off') {
+      await _toggleAlarmGroup(group);
+    } else if (choice == 'skip' && next != null) {
+      try {
+        await platform.invokeMethod('skipNext', {'groupId': group.id});
+        _toast('Skipping ${AlarmGroup.dayWord(next)} ${DateFormat('h:mm a').format(next)}');
+      } catch (e) {
+        _toast('Failed: $e');
+      }
+      await _loadAlarms();
+    } else if (choice == 'undo') {
+      await platform.invokeMethod('setGroupEnabled', {'groupId': group.id, 'enabled': true});
+      await _loadAlarms();
+      _toast('Skip cancelled');
+    }
+  }
+
+  Future<void> _cancelSnooze(AlarmGroup group) async {
+    try {
+      await platform.invokeMethod('cancelSnooze', {'groupId': group.id});
+      _toast('Snooze cancelled');
+    } catch (e) {
+      _toast('Failed: $e');
+    }
+    await _loadAlarms();
+  }
+
+  Future<String?> _offSheet(AlarmGroup group, DateTime? next, bool skipping) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final dim = isDark ? Colors.white54 : Colors.black54;
+    final accent = _accent(context);
+    Widget option(BuildContext c, IconData icon, String title, String sub, String value) => ListTile(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          leading: Icon(icon, color: accent),
+          title: Text(title, style: const TextStyle(fontWeight: FontWeight.w500)),
+          subtitle: Text(sub, style: TextStyle(color: dim)),
+          onTap: () => Navigator.pop(c, value),
+        );
+    return showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      backgroundColor: isDark ? const Color(0xFF1E1F23) : Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (c) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(group.title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500)),
+              const SizedBox(height: 2),
+              Text(AlarmGroup.repeatText(group.days), style: TextStyle(color: dim)),
+              const SizedBox(height: 12),
+              if (group.isSnoozed)
+                option(c, Icons.snooze_rounded, 'Cancel snooze',
+                    'Stops the ${DateFormat('h:mm a').format(DateTime.fromMillisecondsSinceEpoch(group.snoozeAt!))} snooze, alarm stays on',
+                    'snooze'),
+              if (skipping)
+                option(c, Icons.undo_rounded, 'Undo skip', 'Ring as usual again', 'undo')
+              else if (next != null)
+                option(c, Icons.event_busy_outlined, 'Off for ${AlarmGroup.dayWord(next)} only',
+                    'Skips ${DateFormat('EEE h:mm a').format(next)}, then rings as usual', 'skip'),
+              option(c, Icons.alarm_off_rounded, 'Turn off', 'Stays off until you switch it on', 'off'),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _toggleAlarmGroup(AlarmGroup group) async {
@@ -223,17 +415,7 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
       setState(() => group.isEnabled = !newState); // revert
       _toast('Failed to update alarm: $e');
     }
-  }
-
-  Future<void> _deleteAlarmGroup(AlarmGroup group) async {
-    setState(() => _alarmGroups.removeWhere((g) => g.id == group.id));
-    try {
-      await platform.invokeMethod('deleteGroup', {'groupId': group.id});
-      _toast(group.alarms.length == 1 ? 'Alarm deleted' : '${group.alarms.length} alarms deleted');
-    } catch (e) {
-      _toast('Failed to delete: $e');
-    }
-    await _loadAlarms();
+    await _loadAlarms(); // refresh next ring / skip note
   }
 
   Future<void> _deleteAlarm(Map<String, dynamic> alarm) async {
@@ -253,6 +435,7 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
         'toHour': _toTime.hour,
         'toMinute': _toTime.minute,
         'interval': _intervalMinutes,
+        'days': _days,
       });
       await _loadAlarms();
       _toast('$count alarms set, every $_intervalMinutes min');
@@ -264,19 +447,21 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
   Future<void> _saveSingle({AlarmGroup? edit}) async {
     final label = _labelCtrl.text.trim();
     try {
-      await platform.invokeMethod(edit == null ? 'createSingle' : 'updateSingle', {
+      final res = await platform.invokeMethod(edit == null ? 'createSingle' : 'updateSingle', {
         if (edit != null) 'groupId': edit.id,
         'hour': _singleTime.hour,
         'minute': _singleTime.minute,
         'label': label.isEmpty ? null : label,
+        'days': _days,
       });
       await _loadAlarms();
+      final id = edit?.id ?? (res is int ? res : null);
+      final g = _alarmGroups.where((g) => g.id == id).firstOrNull;
       final now = DateTime.now();
       var at = DateTime(now.year, now.month, now.day, _singleTime.hour, _singleTime.minute);
       if (!at.isAfter(now)) at = at.add(const Duration(days: 1));
-      final d = at.difference(now);
-      final h = d.inHours, m = d.inMinutes % 60;
-      _toast(h == 0 ? 'Alarm in ${m == 0 ? 1 : m} min' : 'Alarm in ${h}h ${m}m');
+      if (g?.nextAt != null) at = DateTime.fromMillisecondsSinceEpoch(g!.nextAt!); // respects repeat days
+      _toast('Alarm ${_inText(at.difference(now))}');
     } catch (e) {
       _toast('Failed to set alarm: $e');
     }
@@ -288,7 +473,17 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
   DateTime? _nextAlarm() {
     final now = DateTime.now();
     DateTime? best;
+    for (final g in _alarmGroups.where((g) => g.isSnoozed)) {
+      final t = DateTime.fromMillisecondsSinceEpoch(g.snoozeAt!);
+      if (best == null || t.isBefore(best)) best = t;
+    }
     for (final g in _alarmGroups.where((g) => g.isEnabled)) {
+      // Native knows repeat days + skips; use its answer while it's still ahead.
+      if (g.nextAt != null && g.nextAt! > now.millisecondsSinceEpoch) {
+        final t = DateTime.fromMillisecondsSinceEpoch(g.nextAt!);
+        if (best == null || t.isBefore(best)) best = t;
+        continue;
+      }
       for (final a in g.alarms) {
         final h = a['hour'], m = a['minute'];
         if (h is! int || m is! int) continue;
@@ -303,16 +498,19 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
   String _countdownText() {
     final next = _nextAlarm();
     if (next == null) return 'No upcoming alarms';
-    final d = next.difference(DateTime.now());
-    final h = d.inHours, m = d.inMinutes % 60;
-    if (h == 0) return 'Next alarm in ${m == 0 ? 1 : m} min';
-    return 'Next alarm in ${h}h ${m}m';
+    return 'Next alarm ${_inText(next.difference(DateTime.now()))}';
+  }
+
+  /// "in 5 min" / "in 3h 20m" / "in 2d 4h"
+  static String _inText(Duration d) {
+    final days = d.inDays, h = d.inHours % 24, m = d.inMinutes % 60;
+    if (days > 0) return 'in ${days}d ${h}h';
+    if (h == 0) return 'in ${m == 0 ? 1 : m} min';
+    return 'in ${h}h ${m}m';
   }
 
   Color _accent(BuildContext context) =>
-      Theme.of(context).brightness == Brightness.dark
-          ? const Color(0xFF8AB4F8)
-          : const Color(0xFF3B6FD8);
+      Theme.of(context).colorScheme.primary; // accent chosen in Settings
 
   @override
   Widget build(BuildContext context) {
@@ -320,33 +518,129 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
     final isDark = theme.brightness == Brightness.dark;
     final dim = isDark ? Colors.white54 : Colors.black54;
 
-    return Scaffold(
-      body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Title removed; settings gear lives in HomeShell (fixed across tabs). Right pad clears it.
-            SizedBox(
-              height: 56,
+    return PopScope(
+      canPop: !_selecting, // back button leaves selection first
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _selecting) _exitSelect();
+      },
+      child: Scaffold(
+        body: SafeArea(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Title removed; settings gear lives in HomeShell (fixed across tabs). Right pad clears it.
+              SizedBox(
+                height: 56,
+                child: _selecting
+                    ? _selectionHeader()
+                    : Padding(
+                        padding: const EdgeInsets.fromLTRB(24, 0, 64, 0),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(_countdownText(), style: TextStyle(color: dim, fontSize: 15)),
+                        ),
+                      ),
+              ),
+              if (!_selecting) ...[
+                for (final key in _missingPerms) _permissionBanner(key),
+                if (_missingPerms.isNotEmpty) const SizedBox(height: 4),
+              ],
+              Expanded(child: _buildAlarmsList()),
+            ],
+          ),
+        ),
+        // RepaintBoundary: the breathing glow repaints only the button, not the whole page.
+        floatingActionButton: _selecting
+            ? null
+            : RepaintBoundary(
+                child: _BubbleFab(
+                  color: _accent(context),
+                  onTap: _openAddBubble,
+                ),
+              ),
+        bottomNavigationBar: _selecting ? _deleteBar() : null,
+      ),
+    );
+  }
+
+  /// ✕ | "N items selected" | select all
+  Widget _selectionHeader() {
+    final n = _selected.length;
+    final all = n == _alarmGroups.length && n > 0;
+    return Row(
+      children: [
+        const SizedBox(width: 4),
+        IconButton(icon: const Icon(Icons.close), tooltip: 'Cancel', onPressed: _exitSelect),
+        Expanded(
+          child: Text(
+            n == 0 ? 'Select items' : '$n item${n == 1 ? '' : 's'} selected',
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
+          ),
+        ),
+        IconButton(
+          icon: Icon(all ? Icons.remove_done_rounded : Icons.checklist_rounded),
+          tooltip: all ? 'Deselect all' : 'Select all',
+          onPressed: _toggleSelectAll,
+        ),
+        const SizedBox(width: 4),
+      ],
+    );
+  }
+
+  /// Bottom bar in selection mode (replaces the tab bar).
+  Widget _deleteBar() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final enabled = _selected.isNotEmpty;
+    final fg = (isDark ? Colors.white : Colors.black87).withValues(alpha: enabled ? 1 : 0.35);
+    return Material(
+      color: Theme.of(context).navigationBarTheme.backgroundColor ??
+          (isDark ? const Color(0xFF16171A) : const Color(0xFFF7F8FA)),
+      child: SafeArea(
+        top: false,
+        child: SizedBox(
+          height: 64,
+          child: Center(
+            child: InkWell(
+              borderRadius: BorderRadius.circular(16),
+              onTap: enabled ? _deleteSelected : null,
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 0, 64, 0),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(_countdownText(), style: TextStyle(color: dim, fontSize: 15)),
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 6),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.delete_outline_rounded, color: fg),
+                    const SizedBox(height: 2),
+                    Text('Delete', style: TextStyle(color: fg, fontSize: 12)),
+                  ],
                 ),
               ),
             ),
-            for (final key in _missingPerms) _permissionBanner(key),
-            if (_missingPerms.isNotEmpty) const SizedBox(height: 4),
-            Expanded(child: _buildAlarmsList()),
-          ],
+          ),
         ),
       ),
-      // RepaintBoundary: the breathing glow repaints only the button, not the whole page.
-      floatingActionButton: RepaintBoundary(
-        child: _BubbleFab(
-          color: _accent(context),
-          onTap: _openAddBubble,
+    );
+  }
+
+  /// Round check marker shown in place of the switch while selecting.
+  Widget _selectMark(AlarmGroup g) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final sel = _selected.contains(g.id);
+    return SizedBox(
+      width: 60,
+      height: 48,
+      child: Center(
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          width: 26,
+          height: 26,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: sel ? _accent(context) : (isDark ? Colors.white24 : Colors.black12),
+          ),
+          child: sel
+              ? Icon(Icons.check_rounded, size: 18, color: isDark ? Colors.black : Colors.white)
+              : null,
         ),
       ),
     );
@@ -361,11 +655,14 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.alarm_off_outlined, size: 56, color: dim),
-            const SizedBox(height: 12),
-            Text('No alarms yet', style: TextStyle(color: dim, fontSize: 16)),
-            const SizedBox(height: 4),
-            Text('Tap + to add one', style: TextStyle(color: dim, fontSize: 13)),
+            const SleepyClock(),
+            const SizedBox(height: 16),
+            Text('No alarms yet',
+                style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurface, fontSize: 18, fontWeight: FontWeight.w500)),
+            const SizedBox(height: 6),
+            Text('Tap + to set your first alarm', style: TextStyle(color: dim, fontSize: 14)),
+            const SizedBox(height: 60), // keeps art above the + button visually
           ],
         ),
       );
@@ -383,42 +680,20 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
     final cardColor = isDark ? const Color(0xFF1E1F23) : const Color(0xFFF3F4F7);
     final fg = isDark ? Colors.white : Colors.black87;
     final dim = isDark ? Colors.white54 : Colors.black54;
-    final on = group.isEnabled;
+    final on = group.switchOn; // also ON while a snooze is waiting
+    final bright = on && !group.isSkipping; // skipped = switch on, text dimmed
 
-    // Subtitle: "every 10 min · 7 alarms" for interval groups
+    // Subtitle: "every 10 min · 7 alarms · Daily" for interval groups
     String subtitle = '${group.alarms.length} alarm${group.alarms.length == 1 ? '' : 's'}';
     if (group.isInterval) {
       subtitle = 'every ${group.interval} min · $subtitle';
       if (group.crossesMidnight) subtitle += ' · overnight';
     }
+    subtitle += ' · ${_repeatSub(group)}';
 
-    return Dismissible(
-      key: ValueKey(group.id),
-      direction: DismissDirection.endToStart,
-      background: Container(
-        margin: const EdgeInsets.only(bottom: 12),
-        padding: const EdgeInsets.only(right: 24),
-        alignment: Alignment.centerRight,
-        decoration: BoxDecoration(
-          color: const Color(0xFFD9534F),
-          borderRadius: BorderRadius.circular(24),
-        ),
-        child: const Icon(Icons.delete_outline, color: Colors.white),
-      ),
-      confirmDismiss: (_) async => await showDialog<bool>(
-            context: context,
-            builder: (c) => AlertDialog(
-              title: const Text('Delete alarms?'),
-              content: Text(group.title),
-              actions: [
-                TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
-                TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('Delete')),
-              ],
-            ),
-          ) ??
-          false,
-      onDismissed: (_) => _deleteAlarmGroup(group),
-      child: Container(
+    // Long-press = select mode (delete); swiping left/right always changes tabs.
+    return Container(
+        key: ValueKey(group.id),
         margin: const EdgeInsets.only(bottom: 12),
         decoration: BoxDecoration(
           color: cardColor,
@@ -428,9 +703,12 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
           color: Colors.transparent,
           child: InkWell(
             borderRadius: BorderRadius.circular(24),
-            onTap: group.single
-                ? () => _openAddBubble(edit: group)
-                : () => setState(() => group.isExpanded = !group.isExpanded),
+            onLongPress: _selecting ? null : () => _enterSelect(group),
+            onTap: _selecting
+                ? () => _toggleSelected(group)
+                : group.single
+                    ? () => _openAddBubble(edit: group)
+                    : () => setState(() => group.isExpanded = !group.isExpanded),
             child: group.single ? _singleContent(group, fg, dim) : Padding(
               padding: const EdgeInsets.fromLTRB(20, 18, 12, 18),
               child: Column(
@@ -447,18 +725,21 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
                               style: TextStyle(
                                 fontSize: 22,
                                 fontWeight: FontWeight.w300,
-                                color: on ? fg : dim,
+                                color: bright ? fg : dim,
                               ),
                             ),
                             const SizedBox(height: 4),
-                            Text(subtitle, style: TextStyle(color: dim, fontSize: 13)),
+                            Text(subtitle, style: TextStyle(color: group.isSnoozed ? _accent(context) : dim, fontSize: 13)),
                           ],
                         ),
                       ),
-                      Switch(
-                        value: on,
-                        onChanged: (_) => _toggleAlarmGroup(group),
-                      ),
+                      if (_selecting)
+                        _selectMark(group)
+                      else
+                        BouncySwitch(
+                          value: on,
+                          onChanged: (_) => _onSwitch(group),
+                        ),
                     ],
                   ),
                   AnimatedSize(
@@ -482,16 +763,98 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
             ),
           ),
         ),
-      ),
+    );
+  }
+
+  /// "Daily" / "Sat, Mon" / "Once", or "Skipping tomorrow" while a skip is active.
+  String _repeatSub(AlarmGroup g) {
+    if (g.isSnoozed) {
+      return 'Snoozed · rings ${DateFormat('h:mm a').format(DateTime.fromMillisecondsSinceEpoch(g.snoozeAt!))}';
+    }
+    if (g.isSkipping && g.skipAt > 0) {
+      return 'Skipping ${AlarmGroup.dayWord(DateTime.fromMillisecondsSinceEpoch(g.skipAt))}';
+    }
+    return AlarmGroup.repeatText(g.days);
+  }
+
+  /// Repeat section in the add card: Once | Daily chips, then Sat → Fri day circles.
+  Widget _repeatPicker(StateSetter setLocal, bool isDark, Color accent, Color fg, Color dim) {
+    final onAccent = isDark ? Colors.black : Colors.white;
+    final off = isDark ? Colors.white10 : Colors.black.withValues(alpha: 0.05);
+
+    Widget chip(String text, int value) {
+      final sel = _days == value;
+      return Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: ChoiceChip(
+          label: Text(text),
+          selected: sel,
+          showCheckmark: false,
+          shape: const StadiumBorder(),
+          selectedColor: accent.withValues(alpha: 0.25),
+          side: BorderSide(color: sel ? accent : (isDark ? Colors.white24 : Colors.black12)),
+          onSelected: (_) => setLocal(() => _days = value),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('Repeat', style: TextStyle(color: dim, fontSize: 14)),
+        const SizedBox(height: 10),
+        Row(children: [chip('Once', 0), chip('Daily', 0x7F)]),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            for (final (bit, name) in AlarmGroup.weekOrder)
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 2),
+                  child: GestureDetector(
+                    onTap: () {
+                      HapticFeedback.selectionClick();
+                      setLocal(() => _days ^= 1 << bit);
+                    },
+                    child: AspectRatio(
+                      aspectRatio: 1,
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 150),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _days & (1 << bit) != 0 ? accent : off,
+                        ),
+                        alignment: Alignment.center,
+                        child: FittedBox(
+                          child: Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text(name,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                  color: _days & (1 << bit) != 0 ? onAccent : fg,
+                                )),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ],
     );
   }
 
   /// Card body for a normal one-time alarm: big time, label, switch.
   Widget _singleContent(AlarmGroup group, Color fg, Color dim) {
-    final on = group.isEnabled;
+    final on = group.switchOn; // also ON while a snooze is waiting
+    final bright = on && !group.isSkipping;
     final a = group.alarms.isNotEmpty ? group.alarms.first : null;
     final dt = DateTime(2000, 1, 1, (a?['hour'] as int?) ?? 0, (a?['minute'] as int?) ?? 0);
-    final sub = (group.label?.isNotEmpty ?? false) ? '${group.label} · Once' : 'Once';
+    final sub = (group.label?.isNotEmpty ?? false) ? '${group.label} · ${_repeatSub(group)}' : _repeatSub(group);
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 14, 12, 14),
       child: Row(
@@ -505,7 +868,7 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
                   textBaseline: TextBaseline.alphabetic,
                   children: [
                     Text(DateFormat('h:mm').format(dt),
-                        style: TextStyle(fontSize: 38, fontWeight: FontWeight.w300, color: on ? fg : dim)),
+                        style: TextStyle(fontSize: 38, fontWeight: FontWeight.w300, color: bright ? fg : dim)),
                     const SizedBox(width: 6),
                     Text(DateFormat('a').format(dt),
                         style: TextStyle(fontSize: 14, color: dim)),
@@ -515,11 +878,14 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
                 Text(sub,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: dim, fontSize: 13)),
+                    style: TextStyle(color: group.isSnoozed ? _accent(context) : dim, fontSize: 13)),
               ],
             ),
           ),
-          Switch(value: on, onChanged: (_) => _toggleAlarmGroup(group)),
+          if (_selecting)
+            _selectMark(group)
+          else
+            BouncySwitch(value: on, onChanged: (_) => _onSwitch(group)),
         ],
       ),
     );
@@ -555,9 +921,11 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
       _singleTime = TimeOfDay(
           hour: edit.alarms.first['hour'] as int, minute: edit.alarms.first['minute'] as int);
       _labelCtrl.text = edit.label ?? '';
+      _days = edit.days;
     } else {
       _singleTime = TimeOfDay.now();
       _labelCtrl.clear();
+      _days = 0; // Once by default
     }
     final saved = await showGeneralDialog<bool>(
       context: context,
@@ -698,6 +1066,8 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
                     final singleBody = <Widget>[
                       Center(child: _timeTile('Rings at', _singleTime, pickSingle, fg, dim, big: true)),
                       // Label field removed from UI for now; native label support kept.
+                      const SizedBox(height: 16),
+                      _repeatPicker(setLocal, isDark, accent, fg, dim),
                     ];
 
                     return Column(
@@ -750,6 +1120,8 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
                             );
                           }).toList(),
                         ),
+                        const SizedBox(height: 20),
+                        _repeatPicker(setLocal, isDark, accent, fg, dim),
                             ],
                           ),
                         ),

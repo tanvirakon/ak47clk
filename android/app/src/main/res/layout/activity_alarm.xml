@@ -4,6 +4,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/bg_alarm_gradient"
+    android:clipChildren="false"
     tools:context=".AlarmActivity">
 
     <!-- Video alarm layer (only visible in video mode) -->
@@ -108,12 +109,66 @@
             android:visibility="gone" />
     </LinearLayout>
 
-    <!-- Swipe-up hint + pill -->
+    <!-- Snooze targets: drag the pill down onto 5 / 10 / 15 (hidden for the timer) -->
     <LinearLayout
+        android:id="@+id/snoozeRow"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:layout_marginBottom="72dp"
+        android:layout_marginBottom="40dp"
+        android:alpha="0.45"
+        android:gravity="center"
+        android:orientation="horizontal">
+
+        <LinearLayout
+            android:id="@+id/snooze5"
+            android:layout_width="72dp"
+            android:layout_height="72dp"
+            android:background="@drawable/snooze_target"
+            android:gravity="center"
+            android:orientation="vertical">
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:fontFamily="sans-serif-light" android:text="5" android:textColor="#FFFFFF" android:textSize="22sp" />
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="min" android:textColor="#B3FFFFFF" android:textSize="11sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/snooze10"
+            android:layout_width="72dp"
+            android:layout_height="72dp"
+            android:layout_marginHorizontal="36dp"
+            android:background="@drawable/snooze_target"
+            android:gravity="center"
+            android:orientation="vertical">
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:fontFamily="sans-serif-light" android:text="10" android:textColor="#FFFFFF" android:textSize="22sp" />
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="min" android:textColor="#B3FFFFFF" android:textSize="11sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/snooze15"
+            android:layout_width="72dp"
+            android:layout_height="72dp"
+            android:background="@drawable/snooze_target"
+            android:gravity="center"
+            android:orientation="vertical">
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:fontFamily="sans-serif-light" android:text="15" android:textColor="#FFFFFF" android:textSize="22sp" />
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="min" android:textColor="#B3FFFFFF" android:textSize="11sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- Swipe-up hint + pill -->
+    <LinearLayout
+        android:id="@+id/pillBlock"
+        android:clipChildren="false"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_marginBottom="160dp"
         android:gravity="center_horizontal"
         android:orientation="vertical">
 
@@ -123,7 +178,8 @@
             android:layout_height="wrap_content"
             android:layout_marginBottom="16dp"
             android:fontFamily="sans-serif-light"
-            android:text="Swipe up to turn off"
+            android:gravity="center"
+            android:text="Swipe up to turn off · down to snooze"
             android:textColor="#80FFFFFF"
             android:textSize="14sp" />
 

@@ -36,6 +36,10 @@ class AlarmReceiver : BroadcastReceiver() {
             try { TimerStore.onRang(context) } catch (e: Exception) {
                 Log.e("AlarmReceiver", "Timer onRang failed", e)
             }
+        } else if (alarmId == AlarmScheduler.TEST_ID) {
+            // Test alarm from Settings: nothing to update, just ring.
+        } else if (intent.getBooleanExtra(AlarmScheduler.EXTRA_SNOOZE, false)) {
+            AlarmScheduler.snoozeRang(context, alarmId) // snoozed ring: don't touch the group
         } else if (alarmId != -1) {
             try { AlarmStore.onFired(context, alarmId) } catch (e: Exception) {
                 Log.e("AlarmReceiver", "onFired failed", e)

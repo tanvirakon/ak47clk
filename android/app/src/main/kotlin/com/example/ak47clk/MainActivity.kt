@@ -33,7 +33,12 @@ class MainActivity : FlutterActivity() {
             try {
                 when (call.method) {
                     // ---------- alarms ----------
-                    "getGroups" -> result.success(AlarmStore.toJsonString(AlarmStore.load(this)))
+                    "getGroups" -> result.success(AlarmStore.toJsonString(this, AlarmStore.load(this)))
+
+                    "cancelSnooze" -> {
+                        AlarmStore.cancelSnoozes(this, call.argument<Int>("groupId")!!)
+                        result.success(true)
+                    }
 
                     "createGroup" -> {
                         val g = AlarmStore.createGroup(
@@ -41,8 +46,9 @@ class MainActivity : FlutterActivity() {
                             call.argument<Int>("fromHour")!!, call.argument<Int>("fromMinute")!!,
                             call.argument<Int>("toHour")!!, call.argument<Int>("toMinute")!!,
                             call.argument<Int>("interval")!!,
+                            call.argument<Int>("days") ?: 0,
                         )
-                        g.alarms.forEach { AlarmScheduler.schedule(this, it) }
+                        g.alarms.forEach { AlarmScheduler.schedule(this, g, it) }
                         result.success(g.alarms.size)
                     }
 
@@ -51,40 +57,37 @@ class MainActivity : FlutterActivity() {
                             this,
                             call.argument<Int>("hour")!!, call.argument<Int>("minute")!!,
                             call.argument<String>("label"),
+                            call.argument<Int>("days") ?: 0,
                         )
-                        g.alarms.forEach { AlarmScheduler.schedule(this, it) }
-                        result.success(true)
+                        g.alarms.forEach { AlarmScheduler.schedule(this, g, it) }
+                        result.success(g.id)
                     }
 
                     "updateSingle" -> {
-                        val a = AlarmStore.updateSingle(
+                        val g = AlarmStore.updateSingle(
                             this, call.argument<Int>("groupId")!!,
                             call.argument<Int>("hour")!!, call.argument<Int>("minute")!!,
                             call.argument<String>("label"),
+                            call.argument<Int>("days") ?: 0,
                         )
                         // Same id = same PendingIntent, so this replaces the old trigger time.
-                        a?.let { AlarmScheduler.schedule(this, it) }
-                        result.success(a != null)
+                        g?.alarms?.forEach { AlarmScheduler.schedule(this, g, it); AlarmScheduler.cancelSnooze(this, it.id) }
+                        result.success(g != null)
                     }
 
                     "setGroupEnabled" -> {
-                        val id = call.argument<Int>("groupId")!!
-                        val enabled = call.argument<Boolean>("enabled")!!
-                        val groups = AlarmStore.load(this)
-                        groups.find { it.id == id }?.let { g ->
-                            g.enabled = enabled
-                            g.alarms.forEach {
-                                if (enabled) AlarmScheduler.schedule(this, it) else AlarmScheduler.cancel(this, it)
-                            }
-                        }
-                        AlarmStore.save(this, groups)
+                        AlarmStore.setEnabled(this, call.argument<Int>("groupId")!!, call.argument<Boolean>("enabled")!!)
                         result.success(true)
                     }
+
+                    "skipNext" -> result.success(AlarmStore.skipNext(this, call.argument<Int>("groupId")!!))
 
                     "deleteGroup" -> {
                         val id = call.argument<Int>("groupId")!!
                         val groups = AlarmStore.load(this)
-                        groups.find { it.id == id }?.alarms?.forEach { AlarmScheduler.cancel(this, it) }
+                        groups.find { it.id == id }?.alarms?.forEach {
+                            AlarmScheduler.cancel(this, it); AlarmScheduler.cancelSnooze(this, it.id)
+                        }
                         groups.removeAll { it.id == id }
                         AlarmStore.save(this, groups)
                         result.success(true)
@@ -94,7 +97,9 @@ class MainActivity : FlutterActivity() {
                         val id = call.argument<Int>("alarmId")!!
                         val groups = AlarmStore.load(this)
                         groups.forEach { g ->
-                            g.alarms.filter { it.id == id }.forEach { AlarmScheduler.cancel(this, it) }
+                            g.alarms.filter { it.id == id }.forEach {
+                                AlarmScheduler.cancel(this, it); AlarmScheduler.cancelSnooze(this, it.id)
+                            }
                             g.alarms.removeAll { it.id == id }
                         }
                         groups.removeAll { it.alarms.isEmpty() }
@@ -138,7 +143,12 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
-                    "wheelTick" -> { TickSound.play(); result.success(null) }
+                    "testAlarm" -> {
+                        AlarmScheduler.scheduleTest(this, call.argument<Int>("seconds") ?: 10)
+                        result.success(true)
+                    }
+
+                    "wheelTick" ->{ TickSound.play(); result.success(null) }
 
                     // ---------- countdown timer ----------
                     "getTimer" -> result.success(TimerStore.getJson(this))

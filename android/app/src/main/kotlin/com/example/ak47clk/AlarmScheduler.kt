@@ -49,8 +49,104 @@ object AlarmScheduler {
 
     fun cancelTimer(c: Context) = cancel(c, timerAlarm(System.currentTimeMillis()))
 
-    fun schedule(c: Context, a: AlarmStore.Alarm) =
-        scheduleAt(c, pending(c, a), nextTrigger(a.hour, a.minute))
+    /** "Test alarm" from Settings: one ring after [seconds], same path as a real alarm. */
+    const val TEST_ID = 98_500
+
+    fun scheduleTest(c: Context, seconds: Int) {
+        val at = System.currentTimeMillis() + seconds * 1000L
+        val cal = Calendar.getInstance().apply { timeInMillis = at }
+        val a = AlarmStore.Alarm(TEST_ID, cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE))
+        scheduleAt(c, pending(c, a), at)
+    }
+
+    /**
+     * Next ring of alarm [a] in group [g] strictly after [after].
+     * Once: next h:m. Repeating: days apply to the day a run STARTS, so 1 AM in an
+     * 11 PM–1 AM Friday run rings early Saturday. Rings before g.skipUntil are skipped.
+     */
+    fun nextTrigger(g: AlarmStore.Group, a: AlarmStore.Alarm, after: Long = System.currentTimeMillis()): Long {
+        if (!g.repeats) return nextTrigger(a.hour, a.minute)
+        val bound = maxOf(after, g.skipUntil)
+        val start = g.startMin
+        val offset = g.offsetOf(a)
+        for (d in -1..15) {
+            val cal = Calendar.getInstance().apply {
+                timeInMillis = bound
+                add(Calendar.DAY_OF_YEAR, d)
+                set(Calendar.HOUR_OF_DAY, start / 60)
+                set(Calendar.MINUTE, start % 60)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }
+            if (g.days and (1 shl (cal.get(Calendar.DAY_OF_WEEK) - 1)) == 0) continue
+            cal.add(Calendar.MINUTE, offset)
+            if (cal.timeInMillis > bound) return cal.timeInMillis
+        }
+        return nextTrigger(a.hour, a.minute)
+    }
+
+    fun schedule(c: Context, g: AlarmStore.Group, a: AlarmStore.Alarm, after: Long = System.currentTimeMillis()) =
+        scheduleAt(c, pending(c, a), nextTrigger(g, a, after))
+
+    // ---------------- snooze ----------------
+    // Own PendingIntent per alarm (request code = -alarmId), saved so it survives reboot.
+
+    private const val SNOOZE_PREFS = "snooze_store"
+    const val EXTRA_SNOOZE = "SNOOZE"
+
+    private fun snoozePending(c: Context, alarmId: Int, at: Long): PendingIntent {
+        val cal = Calendar.getInstance().apply { timeInMillis = at }
+        val i = Intent(c, AlarmReceiver::class.java).apply {
+            action = ACTION_ALARM
+            putExtra(EXTRA_ID, alarmId)
+            putExtra(EXTRA_SNOOZE, true)
+            putExtra("HOUR", cal.get(Calendar.HOUR_OF_DAY))
+            putExtra("MINUTE", cal.get(Calendar.MINUTE))
+        }
+        return PendingIntent.getBroadcast(c, -alarmId, i, flags())
+    }
+
+    fun snooze(c: Context, alarmId: Int, minutes: Int) {
+        val at = System.currentTimeMillis() + minutes * 60_000L
+        c.getSharedPreferences(SNOOZE_PREFS, Context.MODE_PRIVATE).edit().putLong(alarmId.toString(), at).commit()
+        scheduleAt(c, snoozePending(c, alarmId, at), at)
+    }
+
+    /** Snoozed alarm rang: forget it. */
+    fun snoozeRang(c: Context, alarmId: Int) {
+        c.getSharedPreferences(SNOOZE_PREFS, Context.MODE_PRIVATE).edit().remove(alarmId.toString()).commit()
+    }
+
+    fun cancelSnooze(c: Context, alarmId: Int) {
+        val p = c.getSharedPreferences(SNOOZE_PREFS, Context.MODE_PRIVATE)
+        if (!p.contains(alarmId.toString())) return
+        val am = c.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val op = snoozePending(c, alarmId, 0)
+        am.cancel(op)
+        op.cancel()
+        p.edit().remove(alarmId.toString()).commit()
+    }
+
+    /** alarmId -> snooze time, future ones only. */
+    fun pendingSnoozes(c: Context): Map<Int, Long> {
+        val now = System.currentTimeMillis()
+        return c.getSharedPreferences(SNOOZE_PREFS, Context.MODE_PRIVATE).all.mapNotNull { (k, v) ->
+            val id = k.toIntOrNull()
+            val at = v as? Long
+            if (id != null && at != null && at > now) id to at else null
+        }.toMap()
+    }
+
+    private fun restoreSnoozes(c: Context) {
+        val p = c.getSharedPreferences(SNOOZE_PREFS, Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        p.all.forEach { (k, v) ->
+            val id = k.toIntOrNull()
+            val at = v as? Long
+            if (id == null || at == null || at <= now) p.edit().remove(k).apply()
+            else scheduleAt(c, snoozePending(c, id, at), at)
+        }
+    }
 
     private fun scheduleAt(c: Context, op: PendingIntent, at: Long) {
         val am = c.getSystemService(Context.ALARM_SERVICE) as AlarmManager
@@ -97,9 +193,10 @@ object AlarmScheduler {
         var n = 0
         AlarmStore.load(c).forEach { g ->
             g.alarms.forEach { a ->
-                if (g.enabled) { schedule(c, a); n++ } else cancel(c, a)
+                if (g.enabled) { schedule(c, g, a); n++ } else cancel(c, a)
             }
         }
+        restoreSnoozes(c)
         TimerStore.restore(c)
         Log.d(TAG, "Rescheduled $n alarms")
     }

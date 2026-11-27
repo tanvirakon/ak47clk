@@ -1,7 +1,9 @@
 // lib/settings_page.dart
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'clock_widgets.dart';
 import 'theme_provider.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -123,12 +125,16 @@ class _SettingsPageState extends State<SettingsPage> {
           _sectionHeader('DISPLAY', dim),
           _row(
             title: 'Dark mode',
-            trailing: Switch(
+            trailing: BouncySwitch(
               value: themeProvider.isDarkMode,
               onChanged: themeProvider.toggleTheme,
             ),
             onTap: () => themeProvider.toggleTheme(!themeProvider.isDarkMode),
           ),
+          const SizedBox(height: 4),
+          const Text('Accent colour', style: TextStyle(fontSize: 18)),
+          const SizedBox(height: 14),
+          _accentPicker(themeProvider),
           const SizedBox(height: 16),
           Divider(color: dim.withValues(alpha: 0.3)),
           const SizedBox(height: 16),
@@ -163,8 +169,120 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             onTap: _pickRingtone,
           ),
+          _row(
+            title: 'Test alarm',
+            subtitle: _testLeft > 0
+                ? 'Ringing in $_testLeft s… you may lock your phone.'
+                : 'Rings in 10 seconds. You may lock your phone.',
+            trailing: _testCountdown(theme.colorScheme.primary),
+            onTap: _testLeft > 0 ? () {} : _testAlarm,
+          ),
+          const SizedBox(height: 24),
         ],
       ),
+    );
+  }
+
+  // Test alarm countdown (seconds left; 0 = idle)
+  int _testLeft = 0;
+  Timer? _testTimer;
+
+  @override
+  void dispose() {
+    _testTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Play icon when idle; while waiting, a draining ring with the seconds left.
+  Widget _testCountdown(Color accent) {
+    return SizedBox(
+      width: 32,
+      height: 32,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 200),
+        child: _testLeft > 0
+            ? Stack(
+                key: const ValueKey('count'),
+                alignment: Alignment.center,
+                children: [
+                  TweenAnimationBuilder<double>(
+                    tween: Tween(end: _testLeft / 10),
+                    duration: const Duration(milliseconds: 900),
+                    builder: (_, v, __) => CircularProgressIndicator(
+                      value: v,
+                      strokeWidth: 2.5,
+                      color: accent,
+                      backgroundColor: accent.withValues(alpha: 0.15),
+                    ),
+                  ),
+                  Text('$_testLeft',
+                      style: TextStyle(color: accent, fontSize: 13, fontWeight: FontWeight.w600)),
+                ],
+              )
+            : Icon(Icons.play_circle_outline_rounded,
+                key: const ValueKey('play'), color: accent, size: 30),
+      ),
+    );
+  }
+
+  Future<void> _testAlarm() async {
+    HapticFeedback.lightImpact();
+    try {
+      await platform.invokeMethod('testAlarm', {'seconds': 10});
+      if (!mounted) return;
+      setState(() => _testLeft = 10);
+      _testTimer?.cancel();
+      _testTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+        if (!mounted) return t.cancel();
+        setState(() => _testLeft--);
+        if (_testLeft <= 0) t.cancel();
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not set test alarm: $e')));
+      }
+    }
+  }
+
+  /// Row of colour dots; the chosen one has a ring + check.
+  Widget _accentPicker(ThemeProvider tp) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Wrap(
+      spacing: 14,
+      runSpacing: 12,
+      children: [
+        for (var i = 0; i < ThemeProvider.accents.length; i++)
+          Builder(builder: (_) {
+            final a = ThemeProvider.accents[i];
+            final color = isDark ? a.dark : a.light;
+            final sel = tp.accentIndex == i;
+            return Tooltip(
+              message: a.name,
+              child: GestureDetector(
+                onTap: () {
+                  HapticFeedback.selectionClick();
+                  tp.setAccent(i);
+                },
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: 40,
+                  height: 40,
+                  padding: const EdgeInsets.all(3),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: sel ? color : Colors.transparent, width: 2),
+                  ),
+                  child: Container(
+                    decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+                    child: sel
+                        ? Icon(Icons.check_rounded, size: 18, color: isDark ? Colors.black : Colors.white)
+                        : null,
+                  ),
+                ),
+              ),
+            );
+          }),
+      ],
     );
   }
 
@@ -178,16 +296,30 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Widget _row({
     required String title,
+    String? subtitle,
     required Widget trailing,
     required VoidCallback onTap,
   }) {
+    final dim = Theme.of(context).brightness == Brightness.dark ? Colors.white54 : Colors.black54;
     return InkWell(
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 20),
         child: Row(
           children: [
-            Expanded(child: Text(title, style: const TextStyle(fontSize: 18))),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: const TextStyle(fontSize: 18)),
+                  if (subtitle != null) ...[
+                    const SizedBox(height: 4),
+                    Text(subtitle, style: TextStyle(color: dim, fontSize: 13)),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
             trailing,
           ],
         ),

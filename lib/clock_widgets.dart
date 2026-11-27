@@ -4,9 +4,55 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-Color accentOf(BuildContext context) => Theme.of(context).brightness == Brightness.dark
-    ? const Color(0xFF8AB4F8)
-    : const Color(0xFF3B6FD8);
+/// App accent (chosen in Settings).
+Color accentOf(BuildContext context) => Theme.of(context).colorScheme.primary;
+
+/// Switch with a little bounce + haptic when flipped.
+class BouncySwitch extends StatefulWidget {
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+  const BouncySwitch({super.key, required this.value, required this.onChanged});
+
+  @override
+  State<BouncySwitch> createState() => _BouncySwitchState();
+}
+
+class _BouncySwitchState extends State<BouncySwitch> with SingleTickerProviderStateMixin {
+  late final AnimationController _c =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 380));
+  late final Animation<double> _scale = TweenSequence([
+    TweenSequenceItem(tween: Tween(begin: 1.0, end: 1.14).chain(CurveTween(curve: Curves.easeOut)), weight: 35),
+    TweenSequenceItem(tween: Tween(begin: 1.14, end: 1.0).chain(CurveTween(curve: Curves.elasticOut)), weight: 65),
+  ]).animate(_c);
+
+  @override
+  void didUpdateWidget(BouncySwitch old) {
+    super.didUpdateWidget(old);
+    if (old.value != widget.value) _c.forward(from: 0); // bounce on any change, incl. from outside
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ScaleTransition(
+      scale: _scale,
+      child: Switch(
+        value: widget.value,
+        onChanged: widget.onChanged == null
+            ? null
+            : (v) {
+                HapticFeedback.lightImpact();
+                widget.onChanged!(v);
+              },
+      ),
+    );
+  }
+}
 
 /// Big thin digits that don't jitter while counting (tabular figures).
 TextStyle bigDigits(BuildContext context, double size) => TextStyle(
@@ -62,6 +108,120 @@ class _RoundButtonState extends State<RoundButton> {
       ),
     );
   }
+}
+
+/// Empty-list art: a sleepy alarm clock gently floating, with "z"s drifting up.
+class SleepyClock extends StatefulWidget {
+  final double size;
+  const SleepyClock({super.key, this.size = 150});
+
+  @override
+  State<SleepyClock> createState() => _SleepyClockState();
+}
+
+class _SleepyClockState extends State<SleepyClock> with SingleTickerProviderStateMixin {
+  late final AnimationController _c =
+      AnimationController(vsync: this, duration: const Duration(seconds: 4))..repeat();
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return RepaintBoundary(
+      child: SizedBox.square(
+        dimension: widget.size,
+        child: AnimatedBuilder(
+          animation: _c,
+          builder: (_, __) => CustomPaint(
+            painter: _SleepyClockPainter(
+              t: _c.value,
+              accent: accentOf(context),
+              face: isDark ? const Color(0xFF1E1F23) : const Color(0xFFF3F4F7),
+              ink: isDark ? Colors.white60 : Colors.black45,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SleepyClockPainter extends CustomPainter {
+  final double t; // 0..1 loop
+  final Color accent, face, ink;
+  _SleepyClockPainter({required this.t, required this.accent, required this.face, required this.ink});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final s = size.width;
+    final bob = math.sin(t * 2 * math.pi) * s * 0.025; // gentle float
+    final c = Offset(s * 0.5, s * 0.58 + bob); // centered; z's float in the top-right corner
+    final r = s * 0.27;
+
+    // soft glow
+    canvas.drawCircle(c, r * 1.35, Paint()..color = accent.withValues(alpha: 0.10));
+
+    // bells
+    final bell = Paint()..color = accent;
+    for (final side in [-1, 1]) {
+      final bc = c + Offset(side * r * 0.62, -r * 0.88);
+      canvas.drawArc(Rect.fromCircle(center: bc, radius: r * 0.34), math.pi, math.pi, true, bell);
+    }
+    // legs
+    final leg = Paint()
+      ..color = accent
+      ..strokeWidth = s * 0.03
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(c + Offset(-r * 0.55, r * 0.8), c + Offset(-r * 0.8, r * 1.12), leg);
+    canvas.drawLine(c + Offset(r * 0.55, r * 0.8), c + Offset(r * 0.8, r * 1.12), leg);
+
+    // face + rim
+    canvas.drawCircle(c, r, Paint()..color = face);
+    canvas.drawCircle(c, r, Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = s * 0.035
+      ..color = accent);
+
+    // sleepy closed eyes (little arcs) + hands
+    final line = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = s * 0.02
+      ..strokeCap = StrokeCap.round
+      ..color = ink;
+    for (final side in [-1, 1]) {
+      canvas.drawArc(Rect.fromCircle(center: c + Offset(side * r * 0.36, -r * 0.12), radius: r * 0.14),
+          0.2, math.pi - 0.4, false, line);
+    }
+    canvas.drawArc(Rect.fromCircle(center: c + Offset(0, r * 0.3), radius: r * 0.12), 0.3, math.pi - 0.6, false, line);
+
+    // three z's drifting up-right, staggered
+    for (var i = 0; i < 3; i++) {
+      final p = (t + i / 3) % 1.0;
+      final opacity = math.sin(p * math.pi); // fade in, then out
+      final pos = Offset(s * 0.70 + p * s * 0.14, s * 0.34 - p * s * 0.30);
+      final tp = TextPainter(
+        text: TextSpan(
+          text: 'z',
+          style: TextStyle(
+            fontSize: s * (0.10 + 0.06 * p),
+            fontWeight: FontWeight.w600,
+            color: accent.withValues(alpha: 0.85 * opacity),
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, pos);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_SleepyClockPainter old) =>
+      old.t != t || old.accent != accent || old.face != face || old.ink != ink;
 }
 
 /// Thin ring: track + progress arc (0..1) from 12 o'clock, optional dot at the arc's end.

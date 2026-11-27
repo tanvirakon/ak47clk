@@ -56,6 +56,7 @@ class AlarmActivity : AppCompatActivity() {
         wakeLock?.acquire(10*60*1000L) // 10 minutes
         
         setContentView(R.layout.activity_alarm)
+        volumeControlStream = android.media.AudioManager.STREAM_ALARM // volume keys adjust alarm volume
         
         // Get alarm time
         val hour = intent.getIntExtra("HOUR", 0)
@@ -78,6 +79,7 @@ class AlarmActivity : AppCompatActivity() {
         val label = try {
             when (alarmId) {
                 AlarmScheduler.TIMER_ID -> "Time's up"
+                AlarmScheduler.TEST_ID -> "Test alarm"
                 -1 -> null
                 else -> AlarmStore.findByAlarmId(this, alarmId)?.label
             }
@@ -89,7 +91,7 @@ class AlarmActivity : AppCompatActivity() {
             }
         }
 
-        setupSwipeToDismiss(hour, minute)
+        setupSwipeToDismiss(hour, minute, alarmId)
         quietServiceNotification()
 
         if (RingtoneStore.isVideoMode(this)) {
@@ -207,40 +209,106 @@ class AlarmActivity : AppCompatActivity() {
         }
     }
 
-    /** Drag pill upward; past threshold -> dismiss, else spring back. */
+    /**
+     * Drag pill up past threshold -> OFF. Drag it down onto a target -> snooze 5 / 10 / 15 min
+     * (target nearest the finger). Otherwise spring back. Timer has no snooze.
+     */
     @android.annotation.SuppressLint("ClickableViewAccessibility")
-    private fun setupSwipeToDismiss(hour: Int, minute: Int) {
+    private fun setupSwipeToDismiss(hour: Int, minute: Int, alarmId: Int) {
         val pill = findViewById<View>(R.id.dismissPill)
-        val hint = findViewById<View>(R.id.swipeHint)
-        val threshold = 160 * resources.displayMetrics.density
+        val hint = findViewById<TextView>(R.id.swipeHint)
+        val row = findViewById<View>(R.id.snoozeRow)
+        val targets = listOf(R.id.snooze5 to 5, R.id.snooze10 to 10, R.id.snooze15 to 15)
+            .map { (id, min) -> findViewById<View>(id) to min }
+        val canSnooze = alarmId != -1 && alarmId != AlarmScheduler.TIMER_ID && alarmId != AlarmScheduler.TEST_ID
+        if (!canSnooze) {
+            row.visibility = View.GONE
+            hint.text = "Swipe up to turn off"
+        }
+        val density = resources.displayMetrics.density
+        val threshold = 160 * density
+        val snoozeThreshold = 80 * density
+        var startX = 0f
         var startY = 0f
-        var dismissed = false
+        var done = false
+        var picked: Pair<View, Int>? = null
+
+        fun nearest(rawX: Float) = targets.minByOrNull { (t, _) ->
+            val loc = IntArray(2).also { t.getLocationOnScreen(it) }
+            kotlin.math.abs(loc[0] + t.width / 2f - rawX)
+        }
+
+        fun highlight(p: Pair<View, Int>?) {
+            if (p?.first == picked?.first) return
+            picked = p
+            if (p != null) pill.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+            targets.forEach { (t, _) ->
+                val on = t == p?.first
+                t.animate().scaleX(if (on) 1.18f else 1f).scaleY(if (on) 1.18f else 1f)
+                    .alpha(if (on || p == null) 1f else 0.5f).setDuration(120).start()
+            }
+        }
+
+        fun springBack() {
+            pill.animate().translationX(0f).translationY(0f).alpha(1f).setDuration(200).start()
+            hint.animate().alpha(1f).setDuration(200).start()
+            row.animate().alpha(0.45f).setDuration(200).start()
+            highlight(null)
+        }
 
         pill.setOnTouchListener { v, e ->
             when (e.actionMasked) {
-                android.view.MotionEvent.ACTION_DOWN -> { startY = e.rawY; true }
+                android.view.MotionEvent.ACTION_DOWN -> { startX = e.rawX; startY = e.rawY; true }
                 android.view.MotionEvent.ACTION_MOVE -> {
-                    val dy = (e.rawY - startY).coerceAtMost(0f)
-                    v.translationY = dy
-                    val p = (-dy / threshold).coerceIn(0f, 1f)
-                    v.alpha = 1f - 0.5f * p
-                    hint.alpha = 1f - p
+                    val dy = e.rawY - startY
+                    if (dy <= 0 || !canSnooze) {
+                        // Up = OFF
+                        v.translationX = 0f
+                        v.translationY = dy.coerceAtMost(0f)
+                        val p = (-v.translationY / threshold).coerceIn(0f, 1f)
+                        v.alpha = 1f - 0.5f * p
+                        hint.alpha = 1f - p
+                        row.alpha = 0.45f * (1f - p)
+                        highlight(null)
+                    } else {
+                        // Down = snooze; pill follows the finger toward a target
+                        v.translationX = e.rawX - startX
+                        v.translationY = dy
+                        val p = (dy / snoozeThreshold).coerceIn(0f, 1f)
+                        hint.alpha = 1f - p
+                        row.alpha = 0.45f + 0.55f * p
+                        highlight(if (dy >= snoozeThreshold * 0.5f) nearest(e.rawX) else null)
+                    }
                     true
                 }
                 android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
-                    if (!dismissed && -v.translationY >= threshold) {
-                        dismissed = true
+                    val target = picked
+                    if (!done && -v.translationY >= threshold) {
+                        done = true
                         v.animate().translationY(-threshold * 2).alpha(0f).setDuration(150)
                             .withEndAction { dismissAlarm(hour, minute) }.start()
+                    } else if (!done && canSnooze && target != null && v.translationY >= snoozeThreshold) {
+                        done = true
+                        v.animate().alpha(0f).setDuration(150)
+                            .withEndAction { snoozeAlarm(alarmId, target.second, hour, minute) }.start()
                     } else {
-                        v.animate().translationY(0f).alpha(1f).setDuration(200).start()
-                        hint.animate().alpha(1f).setDuration(200).start()
+                        springBack()
                     }
                     true
                 }
                 else -> false
             }
         }
+    }
+
+    private fun snoozeAlarm(alarmId: Int, minutes: Int, hour: Int, minute: Int) {
+        try {
+            AlarmScheduler.snooze(this, alarmId, minutes)
+            android.widget.Toast.makeText(this, "Snoozed for $minutes min", android.widget.Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.e("AlarmActivity", "Snooze failed", e)
+        }
+        dismissAlarm(hour, minute)
     }
 
     /** Replace the heads-up notification with a silent one so it doesn't cover the screen. */
@@ -279,7 +347,7 @@ class AlarmActivity : AppCompatActivity() {
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_ALARM)  // Use USAGE_ALARM for proper audio focus
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .setFlags(AudioAttributes.FLAG_AUDIBILITY_ENFORCED)
+                    // No FLAG_AUDIBILITY_ENFORCED: on many phones it ignores the alarm volume (always max).
                     .build()
             )
             setDataSource(applicationContext, alarmSound)

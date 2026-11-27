@@ -254,7 +254,7 @@ class AlarmService : Service() {
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_ALARM)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .setFlags(AudioAttributes.FLAG_AUDIBILITY_ENFORCED)
+                        // No FLAG_AUDIBILITY_ENFORCED: on many phones it ignores the alarm volume (always max).
                         .build()
                 )
                 setDataSource(applicationContext, alarmSound)
