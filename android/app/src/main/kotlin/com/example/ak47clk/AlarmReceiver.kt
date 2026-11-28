@@ -30,6 +30,10 @@ class AlarmReceiver : BroadcastReceiver() {
         val hour = intent.getIntExtra("HOUR", 0)
         val minute = intent.getIntExtra("MINUTE", 0)
         val alarmId = intent.getIntExtra(AlarmScheduler.EXTRA_ID, -1)
+        val fromSnooze = intent.getBooleanExtra(AlarmScheduler.EXTRA_SNOOZE, false)
+
+        // Stats history (skips timer / test inside).
+        RingLog.log(context, "ring", alarmId) { it.put("snz", fromSnooze) }
 
         // A single (one-time) alarm switches itself off once it rings.
         if (alarmId == AlarmScheduler.TIMER_ID) {
@@ -38,7 +42,7 @@ class AlarmReceiver : BroadcastReceiver() {
             }
         } else if (alarmId == AlarmScheduler.TEST_ID) {
             // Test alarm from Settings: nothing to update, just ring.
-        } else if (intent.getBooleanExtra(AlarmScheduler.EXTRA_SNOOZE, false)) {
+        } else if (fromSnooze) {
             AlarmScheduler.snoozeRang(context, alarmId) // snoozed ring: don't touch the group
         } else if (alarmId != -1) {
             try { AlarmStore.onFired(context, alarmId) } catch (e: Exception) {

@@ -142,7 +142,6 @@ class _StopwatchPageState extends State<StopwatchPage>
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final accent = accentOf(context);
     final dim = isDark ? Colors.white54 : Colors.black54;
-    final track = isDark ? Colors.white10 : Colors.black.withValues(alpha: 0.06);
     final softBg = isDark ? const Color(0xFF1E1F23) : const Color(0xFFF3F4F7);
     final idle = !_running && _acc == 0;
 
@@ -161,16 +160,25 @@ class _StopwatchPageState extends State<StopwatchPage>
                     child: ValueListenableBuilder<int>(
                       valueListenable: _elapsed,
                       builder: (context, ms, _) => CustomPaint(
-                        painter: RingPainter(
-                          progress: (ms % 60000) / 60000, // dot sweeps once a minute
-                          track: track,
-                          color: accent,
-                          dotOnly: true,
+                        painter: WatchDialPainter(
+                          litColor: accent,
+                          isDark: isDark,
+                          dots: [
+                            // minutes: once an hour, in the gap between face and ticks
+                            DialDot(turn: (ms % 3600000) / 3600000, radius: 0.775,
+                                size: 0.030, color: hueShift(accent, 150)),
+                            // fast: once a second, on the face rim
+                            DialDot(turn: (ms % 1000) / 1000, radius: 0.70,
+                                size: 0.020, color: hueShift(accent, 210)),
+                            // seconds: once a minute, on the tick ring
+                            DialDot(turn: (ms % 60000) / 60000, radius: WatchDialPainter.tickRing,
+                                size: 0.042, color: accent),
+                          ],
                         ),
                         child: Center(
                           child: FittedBox(
                             child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 28),
+                              padding: const EdgeInsets.symmetric(horizontal: 56),
                               child: Text(fmt(ms), style: bigDigits(context, 56)),
                             ),
                           ),

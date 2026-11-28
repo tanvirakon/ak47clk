@@ -391,7 +391,8 @@ class AlarmActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.e("AlarmActivity", "Snooze failed", e)
         }
-        dismissAlarm(hour, minute)
+        RingLog.log(this, "snooze", alarmId) { it.put("min", minutes) }
+        dismissAlarm(hour, minute, log = false)
     }
 
     /** Replace the heads-up notification with a silent one so it doesn't cover the screen. */
@@ -463,9 +464,10 @@ class AlarmActivity : AppCompatActivity() {
         }
     }
     
-    private fun dismissAlarm(hour: Int, minute: Int) {
+    private fun dismissAlarm(hour: Int, minute: Int, log: Boolean = true) {
         Log.d("AlarmActivity", "Dismissing alarm for $hour:$minute - FORCE STOP")
-        
+        if (log) RingLog.log(this, "off", ringAlarmId)
+
         // FIRST: Stop the service immediately using static method
         AlarmService.requestStop()
         

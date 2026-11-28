@@ -33,6 +33,13 @@ class MainActivity : FlutterActivity() {
                 try { channel?.invokeMethod("clockChanged", null) } catch (_: Exception) {}
             }
         }
+
+        /** A ring / snooze / off was logged: tell Flutter (if running) to refresh stats. */
+        fun notifyStatsChanged() {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try { channel?.invokeMethod("statsChanged", null) } catch (_: Exception) {}
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -137,6 +144,10 @@ class MainActivity : FlutterActivity() {
                         AlarmStore.save(this, groups)
                         result.success(true)
                     }
+
+                    // ---------- stats ----------
+                    "getRingLog" -> result.success(
+                        RingLog.readJson(this, (call.argument<Number>("since") ?: 0).toLong()))
 
                     // ---------- ringtone / video ----------
                     "getRingtoneName" -> result.success(RingtoneStore.name(this))

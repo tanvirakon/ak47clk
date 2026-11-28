@@ -9,11 +9,16 @@ import 'package:flutter/services.dart';
 final ValueNotifier<int> clockChanged = ValueNotifier(0);
 final ValueNotifier<int> openTab = ValueNotifier(-1);
 
+/// Bumps when native logged a ring / snooze / off (Stats tab reloads).
+final ValueNotifier<int> statsChanged = ValueNotifier(0);
+
 void initClockEvents() {
   const MethodChannel('com.example.ak47clk/alarm').setMethodCallHandler((call) async {
     switch (call.method) {
       case 'clockChanged':
         clockChanged.value++;
+      case 'statsChanged':
+        statsChanged.value++;
       case 'openTab':
         openTab.value = -1; // re-fire even if it's the same tab
         openTab.value = (call.arguments as num).toInt();
@@ -242,36 +247,83 @@ class _SleepyClockPainter extends CustomPainter {
       old.t != t || old.accent != accent || old.face != face || old.ink != ink;
 }
 
-/// Thin ring: track + progress arc (0..1) from 12 o'clock, optional dot at the arc's end.
-class RingPainter extends CustomPainter {
-  final double progress;
-  final Color track;
+/// Accent with its hue rotated by [deg] (for the stopwatch's extra dots).
+Color hueShift(Color c, double deg) {
+  final h = HSLColor.fromColor(c);
+  return h.withHue((h.hue + deg) % 360).toColor();
+}
+
+/// A dot orbiting the dial. [turn] 0..1 from 12 o'clock clockwise, [radius] as a fraction of the dial radius.
+class DialDot {
+  final double turn, radius, size;
   final Color color;
-  final bool dotOnly; // stopwatch: just a sweeping dot
-  RingPainter({required this.progress, required this.track, required this.color, this.dotOnly = false});
+  const DialDot({required this.turn, required this.radius, required this.size, required this.color});
+
+  @override
+  bool operator ==(Object other) =>
+      other is DialDot &&
+      other.turn == turn && other.radius == radius && other.size == size && other.color == color;
+  @override
+  int get hashCode => Object.hash(turn, radius, size, color);
+}
+
+/// Watch-style dial: ring of fine ticks and glowing dots, no background of its own.
+/// [lit] (0..1) lights ticks clockwise from 12 o'clock in [litColor]; null = none lit.
+class WatchDialPainter extends CustomPainter {
+  final double? lit;
+  final Color litColor;
+  final List<DialDot> dots;
+  final bool isDark;
+  WatchDialPainter({this.lit, required this.litColor, required this.dots, required this.isDark});
+
+  static const int _ticks = 120;
+  static const double tickRing = 0.87; // radius fraction the outer dot rides on
 
   @override
   void paint(Canvas canvas, Size size) {
-    const stroke = 6.0;
     final c = size.center(Offset.zero);
-    final r = size.shortestSide / 2 - stroke;
-    canvas.drawCircle(c, r, Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = stroke
-      ..color = track);
-    final angle = 2 * math.pi * progress.clamp(0.0, 1.0);
-    if (!dotOnly && progress > 0) {
-      canvas.drawArc(Rect.fromCircle(center: c, radius: r), -math.pi / 2, angle, false, Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = stroke
-        ..strokeCap = StrokeCap.round
-        ..color = color);
+    final r = size.shortestSide / 2;
+
+    // Only marks, straight on the page background: like a clock painted on a wall.
+    // Ticks.
+    final off = isDark ? Colors.white.withValues(alpha: 0.16) : Colors.black.withValues(alpha: 0.13);
+    final litN = lit == null ? 0 : (lit!.clamp(0.0, 1.0) * _ticks).ceil();
+    final tick = Paint()..strokeCap = StrokeCap.round;
+    for (var i = 0; i < _ticks; i++) {
+      final major = i % 10 == 0;
+      final a = 2 * math.pi * i / _ticks - math.pi / 2;
+      final dir = Offset(math.cos(a), math.sin(a));
+      final outer = r * 0.90, inner = r * (major ? 0.81 : 0.84);
+      tick
+        ..color = i < litN ? litColor : off
+        ..strokeWidth = r * (major ? 0.014 : 0.008);
+      canvas.drawLine(c + dir * inner, c + dir * outer, tick);
     }
-    final dot = c + Offset(math.cos(angle - math.pi / 2), math.sin(angle - math.pi / 2)) * r;
-    canvas.drawCircle(dot, stroke * 1.1, Paint()..color = color);
+
+    // Dots with a glow.
+    for (final d in dots) {
+      final a = 2 * math.pi * d.turn - math.pi / 2;
+      final p = c + Offset(math.cos(a), math.sin(a)) * r * d.radius;
+      final s = r * d.size;
+      canvas.drawCircle(p, s * 2.2, Paint()
+        ..color = d.color.withValues(alpha: 0.35)
+        ..maskFilter = MaskFilter.blur(BlurStyle.normal, s * 1.4));
+      canvas.drawCircle(p, s, Paint()..color = d.color);
+    }
   }
 
   @override
-  bool shouldRepaint(RingPainter old) =>
-      old.progress != progress || old.color != color || old.track != track;
+  bool shouldRepaint(WatchDialPainter old) =>
+      old.lit != lit ||
+      old.litColor != litColor ||
+      old.isDark != isDark ||
+      !_sameDots(old.dots, dots);
+
+  static bool _sameDots(List<DialDot> a, List<DialDot> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
 }

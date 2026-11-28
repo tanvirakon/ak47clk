@@ -285,7 +285,6 @@ class _TimerPageState extends State<TimerPage>
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final accent = accentOf(context);
     final dim = isDark ? Colors.white54 : Colors.black54;
-    final track = isDark ? Colors.white10 : Colors.black.withValues(alpha: 0.06);
 
     return Center(
       child: AspectRatio(
@@ -296,10 +295,25 @@ class _TimerPageState extends State<TimerPage>
             child: ValueListenableBuilder<int>(
               valueListenable: _remaining,
               builder: (context, ms, _) => CustomPaint(
-                painter: RingPainter(
-                  progress: _total > 0 ? ms / _total : 0, // drains as time passes
-                  track: track,
-                  color: _isPaused ? dim : accent,
+                painter: WatchDialPainter(
+                  lit: _total > 0 ? ms / _total : 0, // ticks switch off as time passes
+                  litColor: _isPaused ? dim : accent,
+                  isDark: isDark,
+                  dots: [
+                    // seconds left: sweeps backwards once a minute, inside the ticks
+                    DialDot(
+                      turn: (ms % 60000) / 60000,
+                      radius: 0.775,
+                      size: 0.030,
+                      color: _isPaused ? dim : hueShift(accent, 150),
+                    ),
+                    DialDot(
+                      turn: _total > 0 ? (ms / _total).clamp(0.0, 1.0) : 0,
+                      radius: WatchDialPainter.tickRing,
+                      size: 0.042,
+                      color: _isPaused ? dim : accent,
+                    ),
+                  ],
                 ),
                 child: Center(
                   child: Column(
@@ -307,7 +321,7 @@ class _TimerPageState extends State<TimerPage>
                     children: [
                       FittedBox(
                         child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 32),
+                          padding: const EdgeInsets.symmetric(horizontal: 60),
                           child: Text(fmt(ms), style: bigDigits(context, 60)),
                         ),
                       ),

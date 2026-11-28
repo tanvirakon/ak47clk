@@ -4,8 +4,10 @@ import 'package:flutter/services.dart';
 import 'alarm_page.dart';
 import 'clock_widgets.dart';
 import 'settings_page.dart';
+import 'stats_page.dart';
 import 'stopwatch_page.dart';
 import 'timer_page.dart';
+import 'wavy_nav_bar.dart';
 
 /// App shell with the bottom tab bar: Alarm | Timer | Stopwatch.
 class HomeShell extends StatefulWidget {
@@ -52,7 +54,7 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   void _goTo(int i) {
-    if (!mounted || i < 0 || i > 2 || alarmSelecting.value) return;
+    if (!mounted || i < 0 || i > 3 || alarmSelecting.value) return;
     Navigator.of(context).popUntil((r) => r.isFirst); // close Settings if it's open
     setState(() => _tab = i);
     if (_pager.hasClients) _pager.jumpToPage(i);
@@ -81,7 +83,7 @@ class _HomeShellState extends State<HomeShell> {
             // TickerMode: hidden tabs stop animating (saves CPU/battery). State is timestamp-based,
             // so counting continues; the tab catches up the moment it's shown again.
             children: [
-              for (final (i, page) in const [AlarmPage(), TimerPage(), StopwatchPage()].indexed)
+              for (final (i, page) in const [AlarmPage(), TimerPage(), StopwatchPage(), StatsPage()].indexed)
                 _KeepAlive(
                   child: AnimatedBuilder(
                     animation: _pager,
@@ -110,29 +112,28 @@ class _HomeShellState extends State<HomeShell> {
           ),
         ],
       ),
-      bottomNavigationBar: selecting ? null : NavigationBar(
-        selectedIndex: _tab,
-        onDestinationSelected: (i) async {
-          setState(() => _tab = i);
-          _jumping = true; // don't flicker the bar through middle tabs (Alarm -> Stopwatch)
-          await _pager.animateToPage(i,
-              duration: const Duration(milliseconds: 280), curve: Curves.easeOutCubic);
-          _jumping = false;
-        },
-        labelBehavior: NavigationDestinationLabelBehavior.alwaysHide, // icons only
-        height: 60,
-        destinations: const [
-          NavigationDestination(
-              icon: Icon(Icons.alarm_outlined), selectedIcon: Icon(Icons.alarm), label: 'Alarm'),
-          NavigationDestination(
-              icon: Icon(Icons.hourglass_empty_rounded),
-              selectedIcon: Icon(Icons.hourglass_full_rounded),
-              label: 'Timer'),
-          NavigationDestination(
-              icon: Icon(Icons.timer_outlined), selectedIcon: Icon(Icons.timer), label: 'Stopwatch'),
-        ],
+      // Wave follows the pager, so it glides on tap and tracks the finger on swipe.
+      bottomNavigationBar: selecting ? null : AnimatedBuilder(
+        animation: _pager,
+        builder: (context, _) => WavyNavBar(
+          position: _pager.hasClients && _pager.position.haveDimensions
+              ? (_pager.page ?? _tab.toDouble())
+              : _tab.toDouble(),
+          onTap: _select,
+          labels: const ['Alarm', 'Timer', 'Stopwatch', 'Stats'],
+          icons: const [Icons.alarm_outlined, Icons.hourglass_empty_rounded, Icons.timer_outlined, Icons.insights_outlined],
+          selectedIcons: const [Icons.alarm, Icons.hourglass_full_rounded, Icons.timer, Icons.insights],
+        ),
       ),
     );
+  }
+
+  Future<void> _select(int i) async {
+    setState(() => _tab = i);
+    _jumping = true; // keep _tab on the target while the pager slides through middle tabs
+    await _pager.animateToPage(i,
+        duration: const Duration(milliseconds: 320), curve: Curves.easeOutCubic);
+    _jumping = false;
   }
 }
 
