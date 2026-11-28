@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'buttons_page.dart';
 import 'clock_widgets.dart';
 import 'theme_provider.dart';
 
@@ -21,6 +22,14 @@ class _SettingsPageState extends State<SettingsPage> {
   void initState() {
     super.initState();
     _loadRingtoneName();
+    _loadButtons();
+  }
+
+  String _buttonsSummary = 'Off';
+
+  Future<void> _loadButtons() async {
+    final b = await loadButtons();
+    if (mounted) setState(() => _buttonsSummary = buttonsSummary(b));
   }
 
   Future<void> _loadRingtoneName() async {
@@ -168,6 +177,15 @@ class _SettingsPageState extends State<SettingsPage> {
               ],
             ),
             onTap: _pickRingtone,
+          ),
+          _row(
+            title: 'Buttons while ringing',
+            subtitle: _buttonsSummary,
+            trailing: Icon(Icons.chevron_right, color: dim),
+            onTap: () async {
+              await Navigator.push(context, MaterialPageRoute(builder: (_) => const ButtonsPage()));
+              _loadButtons();
+            },
           ),
           _row(
             title: 'Test alarm',

@@ -198,6 +198,7 @@ object AlarmScheduler {
         }
         restoreSnoozes(c)
         TimerStore.restore(c)
+        StopwatchStore.restore(c)
         Log.d(TAG, "Rescheduled $n alarms")
     }
 }

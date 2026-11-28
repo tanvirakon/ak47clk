@@ -162,6 +162,7 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _heroTick?.cancel();
     alarmSelecting.value = false;
     _labelCtrl.dispose();
     super.dispose();
@@ -224,6 +225,7 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
   // Long-press selection (delete several at once)
   bool _selecting = false;
   final Set<int> _selected = {};
+  Timer? _heroTick;
 
   void _enterSelect(AlarmGroup g) {
     HapticFeedback.mediumImpact();
@@ -282,6 +284,10 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _checkLockScreenPermission();
     _loadAlarms();
+    // Keep the "Rings in" header current.
+    _heroTick = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (mounted && !_selecting && _alarmGroups.isNotEmpty) setState(() {});
+    });
 
     // Initialize end time to be 1 hour after start time
     final now = TimeOfDay.now();
@@ -495,10 +501,71 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
     return best;
   }
 
-  String _countdownText() {
+  /// Top of the Alarm tab: big "time until next ring", then the actual day + time.
+  Widget _hero(Color fg, Color dim) {
     final next = _nextAlarm();
-    if (next == null) return 'No upcoming alarms';
-    return 'Next alarm ${_inText(next.difference(DateTime.now()))}';
+    final String lead, big, foot;
+    if (next == null) {
+      lead = 'Next alarm';
+      big = 'All off';
+      foot = 'Switch an alarm on below';
+    } else {
+      final d = next.difference(DateTime.now());
+      final days = d.inDays, h = d.inHours % 24, m = d.inMinutes % 60;
+      lead = 'Rings in';
+      big = days > 0
+          ? '${days}d ${h}h'
+          : h > 0
+              ? '${h}h ${m}m'
+              : '${m == 0 ? 1 : m} min';
+      final day = AlarmGroup.dayWord(next);
+      foot = '${day[0].toUpperCase()}${day.substring(1)}, ${DateFormat('h:mm a').format(next)}';
+    }
+    return Semantics(
+      label: next == null ? 'All alarms off' : '$lead $big, $foot',
+      excludeSemantics: true,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 14, 64, 20), // right pad clears the gear
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(lead, style: TextStyle(color: dim, fontSize: 15)),
+            const SizedBox(height: 2),
+            Text(big,
+                style: TextStyle(
+                  fontSize: 46,
+                  height: 1.1,
+                  fontWeight: FontWeight.w300,
+                  letterSpacing: -1,
+                  color: next == null ? dim : fg,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                )),
+            const SizedBox(height: 4),
+            Text(foot, style: TextStyle(color: next == null ? dim : _accent(context), fontSize: 15)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// S M T W T F S, ringing days in accent (Sat → Fri like the picker).
+  Widget _dayLetters(int days, Color dim) {
+    final accent = _accent(context);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final (bit, name) in AlarmGroup.weekOrder)
+          Padding(
+            padding: const EdgeInsets.only(right: 7),
+            child: Text(name[0],
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: days & (1 << bit) != 0 ? FontWeight.w700 : FontWeight.w400,
+                  color: days & (1 << bit) != 0 ? accent : dim.withValues(alpha: 0.5),
+                )),
+          ),
+      ],
+    );
   }
 
   /// "in 5 min" / "in 3h 20m" / "in 2d 4h"
@@ -529,18 +596,12 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // Title removed; settings gear lives in HomeShell (fixed across tabs). Right pad clears it.
-              SizedBox(
-                height: 56,
-                child: _selecting
-                    ? _selectionHeader()
-                    : Padding(
-                        padding: const EdgeInsets.fromLTRB(24, 0, 64, 0),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: Text(_countdownText(), style: TextStyle(color: dim, fontSize: 15)),
-                        ),
-                      ),
-              ),
+              if (_selecting)
+                SizedBox(height: 56, child: _selectionHeader())
+              else if (_alarmGroups.isEmpty)
+                const SizedBox(height: 56) // empty state art says it all
+              else
+                _hero(theme.colorScheme.onSurface, dim),
               if (!_selecting) ...[
                 for (final key in _missingPerms) _permissionBanner(key),
                 if (_missingPerms.isNotEmpty) const SizedBox(height: 4),
@@ -875,10 +936,28 @@ class _AlarmPageState extends State<AlarmPage> with WidgetsBindingObserver {
                   ],
                 ),
                 const SizedBox(height: 2),
-                Text(sub,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: group.isSnoozed ? _accent(context) : dim, fontSize: 13)),
+                // Picked weekdays read faster as a letter row; status text (snooze/skip/Once/Daily) stays text.
+                if (group.repeats && group.days != 0x7F && !group.isSnoozed && !group.isSkipping)
+                  Row(
+                    children: [
+                      if (group.label?.isNotEmpty ?? false)
+                        Flexible(
+                          child: Padding(
+                            padding: const EdgeInsets.only(right: 10),
+                            child: Text(group.label!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(color: dim, fontSize: 13)),
+                          ),
+                        ),
+                      Opacity(opacity: bright ? 1 : 0.5, child: _dayLetters(group.days, dim)),
+                    ],
+                  )
+                else
+                  Text(sub,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: group.isSnoozed ? _accent(context) : dim, fontSize: 13)),
               ],
             ),
           ),

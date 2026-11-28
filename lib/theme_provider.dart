@@ -26,15 +26,10 @@ class ThemeProvider extends ChangeNotifier {
   int get accentIndex => _accentIndex;
   AccentOption get accent => accents[_accentIndex];
 
-  ThemeProvider() {
-    _loadThemePreference();
-  }
-
-  Future<void> _loadThemePreference() async {
-    final prefs = await SharedPreferences.getInstance();
+  /// Prefs are loaded in main() before the first frame, so the right theme shows instantly (no flash).
+  ThemeProvider(SharedPreferences prefs) {
     _isDarkMode = prefs.getBool('isDarkMode') ?? false;
     _accentIndex = (prefs.getInt('accentIndex') ?? 0).clamp(0, accents.length - 1);
-    notifyListeners();
   }
 
   Future<void> toggleTheme(bool value) async {

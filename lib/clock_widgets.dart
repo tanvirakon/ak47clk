@@ -4,6 +4,24 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+/// Native -> Flutter events from the timer / stopwatch notifications.
+/// clockChanged bumps when a notification button changed state; openTab = tab to show.
+final ValueNotifier<int> clockChanged = ValueNotifier(0);
+final ValueNotifier<int> openTab = ValueNotifier(-1);
+
+void initClockEvents() {
+  const MethodChannel('com.example.ak47clk/alarm').setMethodCallHandler((call) async {
+    switch (call.method) {
+      case 'clockChanged':
+        clockChanged.value++;
+      case 'openTab':
+        openTab.value = -1; // re-fire even if it's the same tab
+        openTab.value = (call.arguments as num).toInt();
+    }
+    return null;
+  });
+}
+
 /// App accent (chosen in Settings).
 Color accentOf(BuildContext context) => Theme.of(context).colorScheme.primary;
 

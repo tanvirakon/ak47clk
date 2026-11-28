@@ -11,22 +11,27 @@ A clean, reliable clock app for Android built with Flutter + native Kotlin. Alar
 - **Repeat**: Once (default), Daily, or custom days (Sat → Fri) — for single and interval alarms.
 - **Skip next**: switching off a repeating alarm asks *Off for tomorrow only* or *Turn off*.
 - **Snooze**: on the ring screen drag the pill down onto **5 / 10 / 15 min** (swipe up = OFF).
-- **"Next alarm in …"** countdown at the top.
+- Big **"Rings in 7h 23m"** countdown at the top, with the day and time of the next ring.
+- Cards with custom days show a **weekday letter row** (ringing days highlighted).
 
 ### Timer
 - h / m / s wheels with a dial tick sound + haptic; quick presets 1 · 5 · 10 · 15 min.
 - Draining ring with time left and end time; pause/resume, cancel, **+1:00**.
 - Rings with the full alarm screen (“Time's up”), even with the app closed.
+- **Notification** with live countdown + **Pause/Resume · +1 min · Cancel** (silent, on lock screen too).
 
 ### Stopwatch
 - Big digits with a sweeping dot; start/pause, lap, reset.
-- Laps newest on top, fastest in green, slowest in red.
+- Laps newest on top, **Fastest** (green) and **Slowest** (red) tagged.
 - Keeps counting with the app closed.
+- **Notification** with live time + **Pause/Resume · Lap · Reset**.
+- Notifications can't be swiped while running; swipe a paused one to reset.
 
 ### Ringing
 - Full-screen ring screen that shows **over the lock screen** (no unlock needed) — swipe up to turn OFF.
 - Ringtone: any system **tone**, or a **video** (plays fullscreen with its audio, loops until OFF). Only one video is kept; picking a tone removes it.
 - Follows your phone's **alarm volume**. Keeps ringing until you turn it off.
+- **Buttons while ringing** (Settings): set Power / Vol + / Vol − to Nothing (default), Snooze 5 / 10 / 15, Silence, or Turn off.
 
 ### App
 - Bottom bar (icons only), **swipe between tabs**; settings gear stays fixed on every tab.
@@ -88,6 +93,7 @@ lib/
 ├── clock_widgets.dart      # Shared round buttons, ring painter
 ├── wheel_time_picker.dart  # Wheel picker + dial tick
 ├── settings_page.dart      # Dark mode, ringtone (tone / video)
+├── buttons_page.dart       # Buttons while ringing (phone drawing)
 └── theme_provider.dart
 
 android/app/src/main/kotlin/com/example/ak47clk/
@@ -95,6 +101,10 @@ android/app/src/main/kotlin/com/example/ak47clk/
 ├── AlarmStore.kt           # Alarm storage (JSON), unique IDs, migration
 ├── AlarmScheduler.kt       # AlarmManager scheduling / reschedule all
 ├── TimerStore.kt           # Timer state (rings natively)
+├── StopwatchStore.kt       # Stopwatch state
+├── ClockNotif.kt           # Timer / stopwatch notifications
+├── ClockActionReceiver.kt  # Notification buttons
+├── ButtonPrefs.kt          # Power / volume button actions while ringing
 ├── AlarmReceiver.kt        # Alarm fired → start service
 ├── AlarmService.kt         # Foreground service: tone, vibration, notification
 ├── AlarmActivity.kt        # Full-screen ring screen (lock screen, video)

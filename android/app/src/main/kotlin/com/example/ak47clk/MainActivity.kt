@@ -19,9 +19,38 @@ class MainActivity : FlutterActivity() {
     private val RINGTONE_REQUEST = 4747
     private val VIDEO_REQUEST = 4748
     private var pendingRingtoneResult: MethodChannel.Result? = null
+    private var pendingTab = -1
+
+    companion object {
+        const val EXTRA_OPEN_TAB = "openTab"
+
+        @Volatile
+        private var channel: MethodChannel? = null
+
+        /** Timer / stopwatch changed from the notification: tell Flutter (if running) to reload. */
+        fun notifyClockChanged() {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try { channel?.invokeMethod("clockChanged", null) } catch (_: Exception) {}
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val tab = intent.getIntExtra(EXTRA_OPEN_TAB, -1)
+        if (tab >= 0) {
+            try { channel?.invokeMethod("openTab", tab) } catch (_: Exception) {}
+        }
+    }
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        channel = null
+        super.cleanUpFlutterEngine(flutterEngine)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        pendingTab = intent?.getIntExtra(EXTRA_OPEN_TAB, -1) ?: -1
 
         // No permission popups on launch: the Alarm page lists missing ones as tappable banners.
         TickSound.init(this)
@@ -29,7 +58,9 @@ class MainActivity : FlutterActivity() {
         // Import alarms from the old storage format once, and schedule them under new ids.
         if (AlarmStore.migrateIfNeeded(this)) AlarmScheduler.rescheduleAll(this)
 
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+        val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        channel = ch
+        ch.setMethodCallHandler { call, result ->
             try {
                 when (call.method) {
                     // ---------- alarms ----------
@@ -157,6 +188,26 @@ class MainActivity : FlutterActivity() {
                         TimerStore.set(this, long("end"), long("left"), long("total"))
                         result.success(true)
                     }
+
+                    // ---------- stopwatch ----------
+                    "getStopwatch" -> result.success(StopwatchStore.getJson(this))
+                    "setStopwatch" -> {
+                        fun long(k: String) = (call.argument<Number>(k) ?: 0).toLong()
+                        val laps = (call.argument<List<Number>>("laps") ?: emptyList()).map { it.toLong() }
+                        StopwatchStore.set(this, StopwatchStore.State(
+                            call.argument<Boolean>("running") ?: false, long("start"), long("acc"), laps))
+                        result.success(true)
+                    }
+
+                    // ---------- hardware buttons while ringing ----------
+                    "getButtons" -> result.success(ButtonPrefs.getJson(this))
+                    "setButton" -> {
+                        ButtonPrefs.set(this, call.argument<String>("key") ?: "", call.argument<String>("value") ?: "")
+                        result.success(true)
+                    }
+
+                    // Notification tapped -> which tab to open (-1 = none)
+                    "takeOpenTab" -> { result.success(pendingTab); pendingTab = -1 }
 
                     // ---------- MIUI lock screen ----------
                     "lockScreenPermissionOk" -> result.success(MiuiPermissions.allGranted(this))

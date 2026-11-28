@@ -1,6 +1,8 @@
 // lib/home_shell.dart
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'alarm_page.dart';
+import 'clock_widgets.dart';
 import 'settings_page.dart';
 import 'stopwatch_page.dart';
 import 'timer_page.dart';
@@ -19,9 +21,41 @@ class _HomeShellState extends State<HomeShell> {
   bool _jumping = false;
 
   @override
+  void initState() {
+    super.initState();
+    openTab.addListener(_onOpenTab);
+    // Opened by tapping the timer / stopwatch notification?
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        final t = await const MethodChannel('com.example.ak47clk/alarm').invokeMethod<int>('takeOpenTab');
+        if (t != null && t >= 0) _goTo(t);
+      } catch (_) {}
+    });
+  }
+
+  @override
   void dispose() {
+    openTab.removeListener(_onOpenTab);
     _pager.dispose();
     super.dispose();
+  }
+
+  /// Tab i is (partly) on screen: the current one, or one sliding in during a swipe.
+  bool _visible(int i) {
+    final p = _pager.hasClients && _pager.position.haveDimensions ? _pager.page : null;
+    if (p == null) return _tab == i;
+    return (p - i).abs() < 1;
+  }
+
+  void _onOpenTab() {
+    if (openTab.value >= 0) _goTo(openTab.value);
+  }
+
+  void _goTo(int i) {
+    if (!mounted || i < 0 || i > 2 || alarmSelecting.value) return;
+    Navigator.of(context).popUntil((r) => r.isFirst); // close Settings if it's open
+    setState(() => _tab = i);
+    if (_pager.hasClients) _pager.jumpToPage(i);
   }
 
   @override
@@ -44,10 +78,17 @@ class _HomeShellState extends State<HomeShell> {
             onPageChanged: (i) {
               if (!_jumping) setState(() => _tab = i);
             },
-            children: const [
-              _KeepAlive(child: AlarmPage()),
-              _KeepAlive(child: TimerPage()),
-              _KeepAlive(child: StopwatchPage()),
+            // TickerMode: hidden tabs stop animating (saves CPU/battery). State is timestamp-based,
+            // so counting continues; the tab catches up the moment it's shown again.
+            children: [
+              for (final (i, page) in const [AlarmPage(), TimerPage(), StopwatchPage()].indexed)
+                _KeepAlive(
+                  child: AnimatedBuilder(
+                    animation: _pager,
+                    child: page,
+                    builder: (_, child) => TickerMode(enabled: _visible(i), child: child!),
+                  ),
+                ),
             ],
           ),
           // Settings gear stays fixed while tabs slide underneath.

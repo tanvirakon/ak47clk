@@ -12,6 +12,10 @@
 .swiftpm/
 migrate_working_dir/
 
+# Claude Code (local tooling)
+.claude/
+skills-lock.json
+
 # IntelliJ related
 *.iml
 *.ipr

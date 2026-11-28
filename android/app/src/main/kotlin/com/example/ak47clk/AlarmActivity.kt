@@ -91,7 +91,11 @@ class AlarmActivity : AppCompatActivity() {
             }
         }
 
+        ringHour = hour
+        ringMinute = minute
+        ringAlarmId = alarmId
         setupSwipeToDismiss(hour, minute, alarmId)
+        registerPowerButton()
         quietServiceNotification()
 
         if (RingtoneStore.isVideoMode(this)) {
@@ -114,6 +118,84 @@ class AlarmActivity : AppCompatActivity() {
     }
 
     private var videoPlayer: MediaPlayer? = null
+
+    // ---------------- hardware buttons (Settings > Buttons while ringing) ----------------
+    private var ringHour = 0
+    private var ringMinute = 0
+    private var ringAlarmId = -1
+    private var buttonDone = false // turned off / snoozed by a button: ignore further presses
+    private var silenced = false
+    private var screenOffReceiver: android.content.BroadcastReceiver? = null
+
+    private val canSnooze get() =
+        ringAlarmId != -1 && ringAlarmId != AlarmScheduler.TIMER_ID && ringAlarmId != AlarmScheduler.TEST_ID
+
+    /** Run the action chosen for a button. Returns false for "nothing" (normal behaviour). */
+    private fun runButtonAction(key: String): Boolean {
+        val action = ButtonPrefs.get(this, key)
+        if (action == ButtonPrefs.NOTHING) return false
+        if (buttonDone) return true
+        val snooze = ButtonPrefs.snoozeMinutes(action)
+        when {
+            action == "silence" -> silenceAlarm()
+            snooze != null && canSnooze -> { buttonDone = true; snoozeAlarm(ringAlarmId, snooze, ringHour, ringMinute) }
+            else -> { buttonDone = true; dismissAlarm(ringHour, ringMinute) } // "off", or snooze on timer/test
+        }
+        return true
+    }
+
+    /** Stop sound + vibration; the screen stays so you can still swipe off / snooze. */
+    private fun silenceAlarm() {
+        if (silenced) return
+        silenced = true
+        AlarmService.getInstance()?.silence()
+        try { mediaPlayer?.stop() } catch (_: Exception) {}
+        mediaPlayer?.release()
+        mediaPlayer = null
+        try { videoPlayer?.setVolume(0f, 0f) } catch (_: Exception) {}
+        vibrator?.cancel()
+        findViewById<TextView>(R.id.swipeHint)?.text =
+            if (canSnooze) "Silenced · swipe up to turn off · down to snooze" else "Silenced · swipe up to turn off"
+    }
+
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        val key = when (keyCode) {
+            android.view.KeyEvent.KEYCODE_VOLUME_UP -> ButtonPrefs.VOL_UP
+            android.view.KeyEvent.KEYCODE_VOLUME_DOWN -> ButtonPrefs.VOL_DOWN
+            else -> return super.onKeyDown(keyCode, event)
+        }
+        if (ButtonPrefs.get(this, key) == ButtonPrefs.NOTHING) return super.onKeyDown(keyCode, event)
+        if (event.repeatCount == 0) runButtonAction(key)
+        return true // consumed: no volume change
+    }
+
+    override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        val key = when (keyCode) {
+            android.view.KeyEvent.KEYCODE_VOLUME_UP -> ButtonPrefs.VOL_UP
+            android.view.KeyEvent.KEYCODE_VOLUME_DOWN -> ButtonPrefs.VOL_DOWN
+            else -> return super.onKeyUp(keyCode, event)
+        }
+        return if (ButtonPrefs.get(this, key) == ButtonPrefs.NOTHING) super.onKeyUp(keyCode, event) else true
+    }
+
+    /** Apps can't read the power key, but pressing it turns the screen off -> we catch that. */
+    private fun registerPowerButton() {
+        if (ButtonPrefs.get(this, ButtonPrefs.POWER) == ButtonPrefs.NOTHING) return
+        val r = object : android.content.BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) {
+                if (i.action == Intent.ACTION_SCREEN_OFF) runButtonAction(ButtonPrefs.POWER)
+            }
+        }
+        try {
+            androidx.core.content.ContextCompat.registerReceiver(
+                this, r, android.content.IntentFilter(Intent.ACTION_SCREEN_OFF),
+                androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            screenOffReceiver = r
+        } catch (e: Exception) {
+            Log.e("AlarmActivity", "Power button receiver failed", e)
+        }
+    }
 
     /** Fullscreen, center-cropped, looping video with its audio on the ALARM stream. */
     private fun startVideo() {
@@ -139,6 +221,7 @@ class AlarmActivity : AppCompatActivity() {
                         isLooping = true // loops until swiped off
                         setOnVideoSizeChangedListener { _, vw, vh -> centerCrop(texture, vw, vh) }
                         setOnPreparedListener {
+                            if (silenced) it.setVolume(0f, 0f)
                             it.start()
                             videoStarted = true
                             AlarmService.getInstance()?.stopToneOnly() // in case fallback tone kicked in
@@ -478,6 +561,8 @@ class AlarmActivity : AppCompatActivity() {
     
     override fun onDestroy() {
         super.onDestroy()
+        screenOffReceiver?.let { try { unregisterReceiver(it) } catch (_: Exception) {} }
+        screenOffReceiver = null
         pulseAnimators.forEach { it.cancel() }
         stopAlarm()
         if (wakeLock?.isHeld == true) {

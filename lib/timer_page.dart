@@ -42,10 +42,12 @@ class _TimerPageState extends State<TimerPage>
     WidgetsBinding.instance.addObserver(this);
     _makeWheels();
     _load();
+    clockChanged.addListener(_load); // paused / +1 / cancelled from the notification
   }
 
   @override
   void dispose() {
+    clockChanged.removeListener(_load);
     WidgetsBinding.instance.removeObserver(this);
     _ticker.dispose();
     _remaining.dispose();

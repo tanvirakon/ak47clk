@@ -1,10 +1,13 @@
 // lib/stopwatch_page.dart
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'clock_widgets.dart';
 
-/// Stopwatch. State is timestamps in prefs, so it keeps counting with the app closed.
+/// Stopwatch. State is timestamps stored natively, so it keeps counting with the app closed
+/// and can be controlled from its notification.
 class StopwatchPage extends StatefulWidget {
   const StopwatchPage({super.key});
 
@@ -12,7 +15,9 @@ class StopwatchPage extends StatefulWidget {
   State<StopwatchPage> createState() => _StopwatchPageState();
 }
 
-class _StopwatchPageState extends State<StopwatchPage> with SingleTickerProviderStateMixin {
+class _StopwatchPageState extends State<StopwatchPage>
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  static const _ch = MethodChannel('com.example.ak47clk/alarm');
   bool _running = false;
   int _startedAt = 0; // epoch ms of last Start
   int _acc = 0; // ms banked before the last Start
@@ -26,17 +31,50 @@ class _StopwatchPageState extends State<StopwatchPage> with SingleTickerProvider
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _load();
+    clockChanged.addListener(_load); // pause / lap / reset from the notification
   }
 
   @override
   void dispose() {
+    clockChanged.removeListener(_load);
+    WidgetsBinding.instance.removeObserver(this);
     _ticker.dispose();
     _elapsed.dispose();
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _load();
+  }
+
+  /// State lives natively (so notification buttons work with the app closed).
   Future<void> _load() async {
+    try {
+      final raw = await _ch.invokeMethod<String>('getStopwatch') ?? '{}';
+      final j = jsonDecode(raw) as Map<String, dynamic>;
+      if (j['init'] != true) {
+        await _migrateOld(); // first run after update: move old Dart-side state over
+        return;
+      }
+      if (!mounted) return;
+      setState(() {
+        _running = j['running'] == true;
+        _startedAt = (j['start'] as num?)?.toInt() ?? 0;
+        _acc = (j['acc'] as num?)?.toInt() ?? 0;
+        _laps = [for (final e in (j['laps'] as List? ?? [])) (e as num).toInt()];
+      });
+      _elapsed.value = _now();
+      if (_running && !_ticker.isActive) _ticker.start();
+      if (!_running && _ticker.isActive) _ticker.stop();
+    } catch (e) {
+      debugPrint('getStopwatch failed: $e');
+    }
+  }
+
+  Future<void> _migrateOld() async {
     final p = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
@@ -45,16 +83,22 @@ class _StopwatchPageState extends State<StopwatchPage> with SingleTickerProvider
       _acc = p.getInt('sw_acc') ?? 0;
       _laps = (p.getStringList('sw_laps') ?? []).map(int.parse).toList();
     });
+    await _save();
+    for (final k in ['sw_running', 'sw_start', 'sw_acc', 'sw_laps']) {
+      await p.remove(k);
+    }
     _elapsed.value = _now();
     if (_running && !_ticker.isActive) _ticker.start();
   }
 
+  /// Push state to native (also updates the notification).
   Future<void> _save() async {
-    final p = await SharedPreferences.getInstance();
-    await p.setBool('sw_running', _running);
-    await p.setInt('sw_start', _startedAt);
-    await p.setInt('sw_acc', _acc);
-    await p.setStringList('sw_laps', _laps.map((e) => '$e').toList());
+    try {
+      await _ch.invokeMethod('setStopwatch',
+          {'running': _running, 'start': _startedAt, 'acc': _acc, 'laps': _laps});
+    } catch (e) {
+      debugPrint('setStopwatch failed: $e');
+    }
   }
 
   void _startPause() {
@@ -192,7 +236,24 @@ class _StopwatchPageState extends State<StopwatchPage> with SingleTickerProvider
           padding: const EdgeInsets.symmetric(vertical: 10),
           child: Row(
             children: [
-              Expanded(child: Text('Lap ${i + 1}', style: style.copyWith(color: color ?? dim))),
+              Expanded(
+                child: Row(
+                  children: [
+                    Text('Lap ${i + 1}', style: style.copyWith(color: color ?? dim)),
+                    if (color != null)
+                      Container(
+                        margin: const EdgeInsets.only(left: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: color.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(split == fast ? 'Fastest' : 'Slowest',
+                            style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w600)),
+                      ),
+                  ],
+                ),
+              ),
               Text(fmt(split), style: style),
               const SizedBox(width: 24),
               Text(fmt(_laps[i]), style: style.copyWith(color: dim)),

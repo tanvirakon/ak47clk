@@ -103,7 +103,7 @@ class AlarmService : Service() {
             // started in 4s (activity blocked / bad file), ring the tone so the alarm is never silent.
             AlarmActivity.videoStarted = false
             handler.postDelayed({
-                if (!isStopped && !AlarmActivity.videoStarted) {
+                if (!isStopped && !silenced && !AlarmActivity.videoStarted) {
                     Log.w("AlarmService", "Video didn't start, falling back to tone")
                     startAlarmSound()
                 }
@@ -238,6 +238,16 @@ class AlarmService : Service() {
         }
     }
     
+    /** Button set to "Silence": stop sound + vibration, keep the ring screen until swiped. */
+    @Volatile var silenced = false
+        private set
+
+    fun silence() {
+        silenced = true
+        stopToneOnly()
+        try { vibrator?.cancel() } catch (_: Exception) {}
+    }
+
     /** Stop service-side tone (used when the video kicks in late, after the fallback tone started). */
     fun stopToneOnly() {
         try { mediaPlayer?.stop(); mediaPlayer?.release() } catch (_: Exception) {}

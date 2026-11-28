@@ -67,7 +67,13 @@
             android:name=".AlarmReceiver"
             android:enabled="true"
             android:exported="false" />
-        
+
+        <!-- Timer / stopwatch notification buttons (own PendingIntents only) -->
+        <receiver
+            android:name=".ClockActionReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
         <!-- Receiver to restore alarms on device restart -->
         <receiver
             android:name=".BootReceiver"
